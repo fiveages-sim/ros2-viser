@@ -37,3 +37,12 @@ class ROS2ViserConfig:
     # Optional: Use existing ROS2RobotInterface instance
     ros2_interface: Optional[object] = None
     """Optional: Use existing ROS2RobotInterface instance instead of creating new one."""
+    
+    enable_fsm_panel: bool = True
+    """Whether to enable FSM (Finite State Machine) control panel. Default: True"""
+    
+    fsm_command_topic: str = "/fsm_command"
+    """ROS2 topic for FSM commands. Default: "/fsm_command" """
+    
+    enable_gripper_panel: bool = True
+    """Whether to enable Gripper control panel. Default: True"""
