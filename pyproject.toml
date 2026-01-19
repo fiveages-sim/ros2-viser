@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ros2-viser"
+version = "0.1.0"
+description = "ROS2 robot visualization using Viser"
+authors = [
+    {name = "Huang Zhenbiao", email = "biao876990970@hotmail.com"}
+]
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+keywords = ["robotics", "ros2", "visualization", "viser"]
+dependencies = [
+    "ros2-robot-interface",
+    "viser",
+    "yourdfpy",
+    "rclpy",
+    "std-msgs",
+    "numpy",
+]
+
+[project.urls]
+Homepage = "https://github.com/fiveages-sim/lerobot_ros2"
+Repository = "https://github.com/fiveages-sim/lerobot_ros2"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ros2_viser*"]
+
+[tool.setuptools.package-data]
+ros2_viser = ["py.typed"]
