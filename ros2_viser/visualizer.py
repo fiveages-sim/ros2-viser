@@ -6,11 +6,10 @@ import threading
 import time
 import warnings
 from io import StringIO
-from typing import Optional
+from typing import Optional, Any
 
 import numpy as np
 import viser
-from rclpy.node import Node
 from viser.extras import ViserUrdf
 import yourdfpy
 
@@ -19,6 +18,7 @@ from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 from .config import ROS2ViserConfig
 from .panels import FSMPanel, GripperPanel, JointPanel
 from .i18n import Translator, get_translator, set_global_language
+from .end_effector_marker import EndEffectorMarkerManager
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +100,13 @@ class ROS2ViserVisualizer:
         self._show_visual_checkbox: Optional[viser.GuiCheckboxHandle] = None
         self._show_collision_checkbox: Optional[viser.GuiCheckboxHandle] = None
         self._language_dropdown: Optional[viser.GuiDropdownHandle] = None
+        self._marker_publish_mode_dropdown: Optional[viser.GuiDropdownHandle] = None
+        self._send_marker_pose_button: Optional[viser.GuiButtonHandle] = None
         self._show_visual: bool = True
         self._show_collision: bool = False
+        
+        # End-effector marker manager
+        self._marker_manager: Optional[EndEffectorMarkerManager] = None
         
         # Note: No direct subscription - use ros2_interface.get_robot_description() instead
     
@@ -120,6 +125,11 @@ class ROS2ViserVisualizer:
             # If URDF already loaded, clean up old visualization and reload interfaces
             if self._urdf_received and self.urdf_vis is not None:
                 logger.info("URDF changed, reloading visualization and ROS2 interfaces...")
+                
+                # Clean up old end-effector markers
+                if self._marker_manager is not None:
+                    self._marker_manager.cleanup()
+                    self._marker_manager = None
                 
                 # Clean up old visualization
                 try:
@@ -220,6 +230,10 @@ class ROS2ViserVisualizer:
             # Update joint_panel with URDF if it was created before URDF was loaded
             if self._joint_panel is not None and self.urdf is not None:
                 self._joint_panel.set_urdf(self.urdf)
+            
+            # Update marker manager with URDF
+            if self._marker_manager is not None:
+                self._marker_manager.set_urdf(self.urdf)
             
         except Exception as e:
             logger.error(f"Failed to parse URDF: {e}", exc_info=True)
@@ -342,6 +356,36 @@ class ROS2ViserVisualizer:
                 )
                 self._joint_panel.initialize()
                 logger.info("✅ Joint panel reinitialized")
+            
+            # Reinitialize marker manager if enabled
+            if self.config.enable_end_effector_marker:
+                # Cleanup existing marker manager if any
+                if self._marker_manager is not None:
+                    try:
+                        self._marker_manager.cleanup()
+                    except Exception as e:
+                        logger.warning(f"Error cleaning up marker manager during reinit: {e}")
+                    self._marker_manager = None
+                
+                # Recreate marker manager
+                if self.server is not None and self.ros2_interface is not None:
+                    self._marker_manager = EndEffectorMarkerManager(
+                        self.server,
+                        self.ros2_interface,
+                        self.config,
+                        self.translator,
+                        self.urdf,
+                        self.config.root_node_name
+                    )
+                    # Connect GUI controls if they exist
+                    if self._marker_publish_mode_dropdown is not None:
+                        self._marker_manager.set_gui_controls(
+                            self._marker_publish_mode_dropdown,
+                            self._send_marker_pose_button
+                        )
+                    # Initialize markers (will be done when interface is ready)
+                    self._marker_manager.initialize()
+                    logger.info("✅ Marker manager reinitialized")
                 
         except Exception as e:
             logger.error(f"Failed to reinitialize panels: {e}", exc_info=True)
@@ -432,6 +476,38 @@ class ROS2ViserVisualizer:
                 self._show_collision_checkbox.on_update(
                     lambda _: self._on_show_collision_changed(self._show_collision_checkbox.value)
                 )
+                
+                # Marker publish mode selection (only if markers are enabled)
+                # These controls are only visible in OCS2 mode
+                if self.config.enable_end_effector_marker:
+                    self._marker_publish_mode_dropdown = self.server.gui.add_dropdown(
+                        self.translator("marker_publish_mode"),
+                        options=[self.translator("continuous_publish"), self.translator("single_publish")],
+                        initial_value=self.translator("continuous_publish") if self.config.marker_continuous_publish else self.translator("single_publish")
+                    )
+                    self._marker_publish_mode_dropdown.on_update(
+                        lambda _: self._on_marker_publish_mode_changed(self._marker_publish_mode_dropdown.value)
+                    )
+                    # Initially hide (will be shown when in OCS2 mode)
+                    self._marker_publish_mode_dropdown.visible = False
+                    
+                    # Send button for single-shot mode (initially hidden)
+                    self._send_marker_pose_button = self.server.gui.add_button(
+                        self.translator("send_marker_pose"),
+                        color="green"
+                    )
+                    self._send_marker_pose_button.on_click(
+                        lambda _: self._on_send_marker_pose_clicked()
+                    )
+                    # Initially hide (will be shown when in OCS2 mode and single-shot mode)
+                    self._send_marker_pose_button.visible = False
+                    
+                    # Connect GUI controls to marker manager (if it exists)
+                    if self._marker_manager is not None:
+                        self._marker_manager.set_gui_controls(
+                            self._marker_publish_mode_dropdown,
+                            self._send_marker_pose_button
+                        )
             
             logger.debug("Display control panel initialized")
         except Exception as e:
@@ -448,6 +524,20 @@ class ROS2ViserVisualizer:
         self._show_collision = value
         self._update_urdf_display()
         logger.debug(f"Show collision changed to: {value}")
+    
+    def _on_marker_publish_mode_changed(self, mode_display: str):
+        """Callback when marker publish mode dropdown is changed.
+        
+        Args:
+            mode_display: Display name of selected mode.
+        """
+        if self._marker_manager is not None:
+            self._marker_manager.on_publish_mode_changed(mode_display)
+    
+    def _on_send_marker_pose_clicked(self):
+        """Callback when send marker pose button is clicked (single-shot mode)."""
+        if self._marker_manager is not None:
+            self._marker_manager.on_send_button_clicked()
     
     def _on_language_changed(self, language_display: str):
         """Callback when language dropdown is changed.
@@ -624,13 +714,12 @@ class ROS2ViserVisualizer:
                 )
                 
                 # Create ViserUrdf with collision meshes enabled
-                # According to Viser documentation, we need to pass load_collision_meshes=True
                 self.urdf_vis = ViserUrdf(
                     self.server,
                     self.urdf,
                     root_node_name=self.config.root_node_name,
-                    load_meshes=True,  # Load visual meshes
-                    load_collision_meshes=has_collision_scene,  # Load collision meshes if available
+                    load_meshes=True,
+                    load_collision_meshes=has_collision_scene, 
                 )
                 logger.info(f"✅ URDF visualization initialized at {self.config.root_node_name}")
                 if has_collision_scene:
@@ -647,6 +736,26 @@ class ROS2ViserVisualizer:
             except Exception as e:
                 logger.error(f"Failed to create ViserUrdf: {e}", exc_info=True)
                 raise
+            
+            # Initialize end-effector marker manager if enabled
+            if self.config.enable_end_effector_marker and self._marker_manager is None:
+                if self.server is not None and self.ros2_interface is not None:
+                    self._marker_manager = EndEffectorMarkerManager(
+                        self.server,
+                        self.ros2_interface,
+                        self.config,
+                        self.translator,
+                        self.urdf,
+                        self.config.root_node_name
+                    )
+                    # Connect GUI controls if they exist
+                    if self._marker_publish_mode_dropdown is not None:
+                        self._marker_manager.set_gui_controls(
+                            self._marker_publish_mode_dropdown,
+                            self._send_marker_pose_button
+                        )
+                    # Initialize markers (will be done when interface is ready)
+                    self._marker_manager.initialize()
             
             # Start update loop if not already running
             # Note: The sleep after starting the thread is done outside this method
@@ -684,6 +793,7 @@ class ROS2ViserVisualizer:
                     self._check_robot_description_from_interface()
                 except Exception as e:
                     logger.debug(f"Error checking robot description: {e}")
+                
             
             # Check if ROS2 interface needs reconnection (triggered by URDF change)
             needs_reconnect = self._needs_reconnect
@@ -735,6 +845,13 @@ class ROS2ViserVisualizer:
                     last_joint_panel_update = current_time
                 except Exception as e:
                     logger.warning(f"Failed to update Joint panel in update loop: {e}")
+            
+            # Update end-effector markers (check for changes and send commands)
+            if self._marker_manager is not None:
+                try:
+                    self._marker_manager.update()
+                except Exception as e:
+                    logger.debug(f"Error updating end-effector markers: {e}")
             
             # Update URDF visualization
             if self.urdf_vis is not None and self.ros2_interface is not None:
@@ -932,6 +1049,14 @@ class ROS2ViserVisualizer:
                 self._display_folder_handle.remove()
             except Exception as e:
                 logger.warning(f"Error removing display control panel: {e}")
+        
+        # Cleanup end-effector marker manager
+        if self._marker_manager is not None:
+            try:
+                self._marker_manager.cleanup()
+            except Exception as e:
+                logger.warning(f"Error cleaning up marker manager: {e}")
+            self._marker_manager = None
         
         # Cleanup Viser
         if self.urdf_vis is not None:

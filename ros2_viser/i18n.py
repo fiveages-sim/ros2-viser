@@ -25,6 +25,10 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "show_collision": "显示 Collision",
         "language": "语言",
         "select_language": "选择语言",
+        "marker_publish_mode": "末端指令模式",
+        "continuous_publish": "连续发布",
+        "single_publish": "单次发布",
+        "send_marker_pose": "发送末端位置",
         
         # FSM Panel
         "fsm_control": "FSM 控制",
@@ -66,6 +70,10 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "show_collision": "Show Collision",
         "language": "Language",
         "select_language": "Select Language",
+        "marker_publish_mode": "EE Target Mode",
+        "continuous_publish": "Continuous Publish",
+        "single_publish": "Single Publish",
+        "send_marker_pose": "Send EE Pose",
         
         # FSM Panel
         "fsm_control": "FSM Control",

@@ -1,6 +1,7 @@
 """Configuration for ROS2 Viser visualizer."""
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -44,6 +45,21 @@ class ROS2ViserConfig:
     
     enable_joint_panel: bool = True
     """Whether to enable Joint control panel. Default: True"""
+    
+    enable_end_effector_marker: bool = True
+    """Whether to enable draggable end-effector marker for sending pose commands. Default: True"""
+    
+    end_effector_link_name: Optional[str] = None
+    """Name of the end-effector link. If None, will try to auto-detect from URDF. Default: None"""
+    
+    marker_scale: float = 0.15
+    """Scale of the draggable marker. Default: 0.15"""
+    
+    marker_continuous_publish: bool = True
+    """Whether to use continuous publish mode for end-effector markers.
+    If True, marker position is published continuously while dragging.
+    If False, marker position is only published when clicking the send button.
+    Default: True"""
     
     language: str = "zh"
     """Language for GUI labels. Options: "zh" (Chinese) or "en" (English). Default: "zh" """
