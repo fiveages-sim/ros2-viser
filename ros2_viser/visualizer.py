@@ -76,10 +76,8 @@ class ROS2ViserVisualizer:
         
         # Flag to trigger ROS2 interface reconnection (set in callback, handled in update loop)
         self._needs_reconnect = False
-        self._reconnect_lock = threading.Lock()
         
         # URDF reloading
-        self._urdf_lock = threading.Lock()  # Lock for URDF reloading
         self._last_urdf_hash: Optional[str] = None  # Hash of last URDF to detect changes
         
         # Joint name mapping (from joint_states to URDF joint order)
@@ -113,125 +111,122 @@ class ROS2ViserVisualizer:
         Args:
             urdf_string: URDF XML string
             urdf_hash: Optional hash of the URDF string for change detection
-        """
-        with self._urdf_lock:
-            if not urdf_string or len(urdf_string.strip()) == 0:
-                logger.warning("URDF string is empty, skipping parse")
-                return
-            
-            try:
-                # If URDF already loaded, clean up old visualization and reload interfaces
-                if self._urdf_received and self.urdf_vis is not None:
-                    logger.info("URDF changed, reloading visualization and ROS2 interfaces...")
-                    
-                    # Clean up old visualization
-                    try:
-                        self.urdf_vis.remove()
-                    except Exception as e:
-                        logger.warning(f"Error removing old URDF visualization: {e}")
-                    self.urdf_vis = None
-                    
-                    # Mark that ROS2 interface needs reconnection (don't do it here - we're in a callback thread)
-                    # The reconnection will be handled in the update loop to avoid threading issues
-                    if self._own_interface and self.ros2_interface is not None:
-                        with self._reconnect_lock:
-                            self._needs_reconnect = True
-                        logger.info("URDF changed - ROS2 interface reconnection will be handled in update loop")
+            """
+        if not urdf_string or len(urdf_string.strip()) == 0:
+            logger.warning("URDF string is empty, skipping parse")
+            return
+        
+        try:
+            # If URDF already loaded, clean up old visualization and reload interfaces
+            if self._urdf_received and self.urdf_vis is not None:
+                logger.info("URDF changed, reloading visualization and ROS2 interfaces...")
                 
-                # Parse URDF from string using StringIO
-                logger.debug(f"Parsing URDF (length: {len(urdf_string)} characters)")
-                # yourdfpy.URDF.load() can load from a file-like object
-                # Load with visual scene and collision scene enabled (needed for ViserUrdf visualization)
-                urdf_io = StringIO(urdf_string)
+                # Clean up old visualization
                 try:
-                    # Try to load with explicit parameters to enable visual and collision scenes
-                    # build_scene_graph=True enables visual scene
-                    # load_collision_meshes=True and build_collision_scene_graph=True enable collision scene
-                    self.urdf = yourdfpy.URDF.load(
-                        urdf_io,
-                        build_scene_graph=True,
-                        load_collision_meshes=True,
-                        build_collision_scene_graph=True
-                    )
-                    logger.debug("URDF loaded with build_scene_graph=True, load_collision_meshes=True, build_collision_scene_graph=True")
-                except (AttributeError, TypeError) as e:
-                    # Fallback: try with fewer parameters (older versions)
-                    if "build_scene_graph" in str(e) or "unexpected keyword" in str(e) or "load_collision_meshes" in str(e):
-                        urdf_io.seek(0)  # Reset StringIO
-                        try:
-                            # Try with just build_scene_graph
-                            self.urdf = yourdfpy.URDF.load(urdf_io, build_scene_graph=True)
-                            logger.debug("URDF loaded with build_scene_graph=True (collision meshes may not be loaded)")
-                        except (AttributeError, TypeError):
-                            # Final fallback: load normally
-                            urdf_io.seek(0)
-                            self.urdf = yourdfpy.URDF.load(urdf_io)
-                            logger.debug("URDF loaded with default settings (visual scene should be enabled, collision may not be loaded)")
+                    self.urdf_vis.remove()
+                except Exception as e:
+                    logger.warning(f"Error removing old URDF visualization: {e}")
+                self.urdf_vis = None
+                
+                # Mark that ROS2 interface needs reconnection (don't do it here - we're in a callback thread)
+                # The reconnection will be handled in the update loop to avoid threading issues
+                if self._own_interface and self.ros2_interface is not None:
+                    self._needs_reconnect = True
+                    logger.info("URDF changed - ROS2 interface reconnection will be handled in update loop")
+            
+            # Parse URDF from string using StringIO
+            logger.debug(f"Parsing URDF (length: {len(urdf_string)} characters)")
+            # yourdfpy.URDF.load() can load from a file-like object
+            # Load with visual scene and collision scene enabled (needed for ViserUrdf visualization)
+            urdf_io = StringIO(urdf_string)
+            try:
+                # Try to load with explicit parameters to enable visual and collision scenes
+                # build_scene_graph=True enables visual scene
+                # load_collision_meshes=True and build_collision_scene_graph=True enable collision scene
+                self.urdf = yourdfpy.URDF.load(
+                    urdf_io,
+                    build_scene_graph=True,
+                    load_collision_meshes=True,
+                    build_collision_scene_graph=True
+                )
+                logger.debug("URDF loaded with build_scene_graph=True, load_collision_meshes=True, build_collision_scene_graph=True")
+            except (AttributeError, TypeError) as e:
+                # Fallback: try with fewer parameters (older versions)
+                if "build_scene_graph" in str(e) or "unexpected keyword" in str(e) or "load_collision_meshes" in str(e):
+                    urdf_io.seek(0)  # Reset StringIO
+                    try:
+                        # Try with just build_scene_graph
+                        self.urdf = yourdfpy.URDF.load(urdf_io, build_scene_graph=True)
+                        logger.debug("URDF loaded with build_scene_graph=True (collision meshes may not be loaded)")
+                    except (AttributeError, TypeError):
+                        # Final fallback: load normally
+                        urdf_io.seek(0)
+                        self.urdf = yourdfpy.URDF.load(urdf_io)
+                        logger.debug("URDF loaded with default settings (visual scene should be enabled, collision may not be loaded)")
+                else:
+                    raise
+            
+            # Set flag BEFORE logging to ensure it's set immediately
+            self._urdf_received = True
+            if urdf_hash:
+                self._last_urdf_hash = urdf_hash
+            
+            logger.info("✅ URDF parsed successfully")
+            
+            # Extract ALL joint names from URDF (in order)
+            # ViserUrdf.update_cfg() needs ALL joints, not just actuated ones
+            # This includes: actuated joints, mimic joints, and fixed joints
+            self.urdf_all_joint_names = []
+            self.urdf_actuated_joint_names = []
+            self.mimic_joint_info = {}  # {mimic_joint_name: (mimicked_joint_name, multiplier, offset)}
+            
+            for joint_name, joint in self.urdf.joint_map.items():
+                self.urdf_all_joint_names.append(joint_name)
+                
+                # Track actuated joints
+                if joint.type in ['revolute', 'prismatic', 'continuous']:
+                    self.urdf_actuated_joint_names.append(joint_name)
+                
+                # Track mimic joints
+                if joint.mimic is not None:
+                    mimicked_joint = joint.mimic.joint
+                    multiplier = joint.mimic.multiplier if joint.mimic.multiplier is not None else 1.0
+                    offset = joint.mimic.offset if joint.mimic.offset is not None else 0.0
+                    
+                    # Check if the mimicked joint exists in the URDF
+                    if mimicked_joint in self.urdf.joint_map:
+                        # Check if the mimicked joint is actuated
+                        mimicked_joint_obj = self.urdf.joint_map[mimicked_joint]
+                        if mimicked_joint_obj.type not in ['revolute', 'prismatic', 'continuous']:
+                            logger.warning(f"Mimic joint '{joint_name}' references non-actuated joint '{mimicked_joint}' "
+                                            f"(type: {mimicked_joint_obj.type}). "
+                                            f"This may cause issues. Please fix the URDF.")
+                        # Track mimic joints (simple, non-recursive)
+                        self.mimic_joint_info[joint_name] = (mimicked_joint, multiplier, offset)
                     else:
-                        raise
-                
-                # Set flag BEFORE logging to ensure it's set immediately
-                self._urdf_received = True
-                if urdf_hash:
-                    self._last_urdf_hash = urdf_hash
-                
-                logger.info("✅ URDF parsed successfully")
-                
-                # Extract ALL joint names from URDF (in order)
-                # ViserUrdf.update_cfg() needs ALL joints, not just actuated ones
-                # This includes: actuated joints, mimic joints, and fixed joints
-                self.urdf_all_joint_names = []
-                self.urdf_actuated_joint_names = []
-                self.mimic_joint_info = {}  # {mimic_joint_name: (mimicked_joint_name, multiplier, offset)}
-                
-                for joint_name, joint in self.urdf.joint_map.items():
-                    self.urdf_all_joint_names.append(joint_name)
-                    
-                    # Track actuated joints
-                    if joint.type in ['revolute', 'prismatic', 'continuous']:
-                        self.urdf_actuated_joint_names.append(joint_name)
-                    
-                    # Track mimic joints
-                    if joint.mimic is not None:
-                        mimicked_joint = joint.mimic.joint
-                        multiplier = joint.mimic.multiplier if joint.mimic.multiplier is not None else 1.0
-                        offset = joint.mimic.offset if joint.mimic.offset is not None else 0.0
-                        
-                        # Check if the mimicked joint exists in the URDF
-                        if mimicked_joint in self.urdf.joint_map:
-                            # Check if the mimicked joint is actuated
-                            mimicked_joint_obj = self.urdf.joint_map[mimicked_joint]
-                            if mimicked_joint_obj.type not in ['revolute', 'prismatic', 'continuous']:
-                                logger.warning(f"Mimic joint '{joint_name}' references non-actuated joint '{mimicked_joint}' "
-                                             f"(type: {mimicked_joint_obj.type}). "
-                                             f"This may cause issues. Please fix the URDF.")
-                            # Track mimic joints (simple, non-recursive)
-                            self.mimic_joint_info[joint_name] = (mimicked_joint, multiplier, offset)
-                        else:
-                            logger.warning(f"Mimic joint '{joint_name}' references unknown joint '{mimicked_joint}'. Skipping.")
-                
-                logger.debug(f"Extracted {len(self.urdf_all_joint_names)} total joints from URDF "
-                           f"({len(self.urdf_actuated_joint_names)} actuated, "
-                           f"{len(self.mimic_joint_info)} mimic, "
-                           f"{len(self.urdf_all_joint_names) - len(self.urdf_actuated_joint_names) - len(self.mimic_joint_info)} fixed)")
-                
-                # Precompute mapping from joint name to URDF index (only computed once)
-                self._joint_name_to_urdf_index = {name: i for i, name in enumerate(self.urdf_all_joint_names)}
-                
-                # Initialize Viser visualization
-                # Note: We're already inside _urdf_lock, so call the unlocked version
-                self._init_viser_unlocked()
-                
-                # Update joint_panel with URDF if it was created before URDF was loaded
-                if self._joint_panel is not None and self.urdf is not None:
-                    self._joint_panel.set_urdf(self.urdf)
-                
-            except Exception as e:
-                logger.error(f"Failed to parse URDF: {e}", exc_info=True)
-                logger.error(f"URDF data length: {len(urdf_string) if urdf_string else 0}")
-                if urdf_string:
-                    logger.error(f"URDF data preview (first 500 chars): {urdf_string[:500]}")
-                return
+                        logger.warning(f"Mimic joint '{joint_name}' references unknown joint '{mimicked_joint}'. Skipping.")
+            
+            logger.debug(f"Extracted {len(self.urdf_all_joint_names)} total joints from URDF "
+                        f"({len(self.urdf_actuated_joint_names)} actuated, "
+                        f"{len(self.mimic_joint_info)} mimic, "
+                        f"{len(self.urdf_all_joint_names) - len(self.urdf_actuated_joint_names) - len(self.mimic_joint_info)} fixed)")
+            
+            # Precompute mapping from joint name to URDF index (only computed once)
+            self._joint_name_to_urdf_index = {name: i for i, name in enumerate(self.urdf_all_joint_names)}
+            
+            # Initialize Viser visualization
+            self._init_viser_unlocked()
+            
+            # Update joint_panel with URDF if it was created before URDF was loaded
+            if self._joint_panel is not None and self.urdf is not None:
+                self._joint_panel.set_urdf(self.urdf)
+            
+        except Exception as e:
+            logger.error(f"Failed to parse URDF: {e}", exc_info=True)
+            logger.error(f"URDF data length: {len(urdf_string) if urdf_string else 0}")
+            if urdf_string:
+                logger.error(f"URDF data preview (first 500 chars): {urdf_string[:500]}")
+            return
         
         # Give server a moment to fully start (outside lock to avoid holding it too long)
         # This is safe because the update thread was already started in _init_viser_unlocked()
@@ -398,9 +393,8 @@ class ROS2ViserVisualizer:
             logger.error(f"Failed to update panels with new language: {e}", exc_info=True)
     
     def _init_viser(self):
-        """Initialize Viser server and URDF visualization (with lock)."""
-        with self._urdf_lock:
-            self._init_viser_unlocked()
+        """Initialize Viser server and URDF visualization."""
+        self._init_viser_unlocked()
     
     def _init_display_control_panel(self):
         """Initialize display control panel with checkboxes for visual and collision."""
@@ -692,10 +686,9 @@ class ROS2ViserVisualizer:
                     logger.debug(f"Error checking robot description: {e}")
             
             # Check if ROS2 interface needs reconnection (triggered by URDF change)
-            with self._reconnect_lock:
-                needs_reconnect = self._needs_reconnect
-                if needs_reconnect:
-                    self._needs_reconnect = False  # Clear flag
+            needs_reconnect = self._needs_reconnect
+            if needs_reconnect:
+                self._needs_reconnect = False  # Clear flag
             
             if needs_reconnect and self._own_interface and self.ros2_interface is not None:
                 logger.info("Reconnecting ROS2RobotInterface to detect new controllers/topics...")
@@ -743,76 +736,71 @@ class ROS2ViserVisualizer:
                 except Exception as e:
                     logger.warning(f"Failed to update Joint panel in update loop: {e}")
             
-            # Use lock to ensure URDF is not being reloaded during update
-            with self._urdf_lock:
-                if self.urdf_vis is not None and self.ros2_interface is not None:
-                    # Check if interface is connected before using it
-                    if not self.ros2_interface.is_connected:
-                        # Log periodically if interface is not connected
-                        if current_time - last_joint_state_log >= log_interval:
-                            logger.debug("ROS2RobotInterface is not connected, waiting for reconnection...")
-                            last_joint_state_log = current_time
-                        time.sleep(update_period)
-                        continue
+            # Update URDF visualization
+            if self.urdf_vis is not None and self.ros2_interface is not None:
+                # Check if interface is connected before using it
+                if not self.ros2_interface.is_connected:
+                    # Log periodically if interface is not connected
+                    if current_time - last_joint_state_log >= log_interval:
+                        logger.debug("ROS2RobotInterface is not connected, waiting for reconnection...")
+                        last_joint_state_log = current_time
+                    time.sleep(update_period)
+                    continue
+                
+                # Get joint state from ROS2 interface
+                joint_state = self.ros2_interface.get_joint_state()
+                
+                if joint_state is not None:
+                    # Map joint states to URDF joint order
+                    joint_positions = self._map_joint_states(
+                        joint_state['names'],
+                        joint_state['positions']
+                    )
                     
-                    # Get joint state from ROS2 interface
-                    joint_state = self.ros2_interface.get_joint_state()
-                    
-                    if joint_state is not None:
-                        # Map joint states to URDF joint order
-                        joint_positions = self._map_joint_states(
-                            joint_state['names'],
-                            joint_state['positions']
-                        )
-                        
-                        if joint_positions is not None:
-                            # Update visualization
-                            # _map_joint_states already returns a properly formatted numpy array
-                            try:
-                                # Ensure array is contiguous (for performance)
-                                if not joint_positions.flags['C_CONTIGUOUS']:
-                                    joint_positions = np.ascontiguousarray(joint_positions, dtype=np.float64)
-                                
-                                # Skip update if values haven't changed (especially important for complex visual models)
-                                # This reduces unnecessary rendering for visual models which are more complex
-                                if self._last_joint_positions is not None:
-                                    if np.array_equal(joint_positions, self._last_joint_positions):
-                                        # Values unchanged, skip update to avoid unnecessary rendering
-                                        # This is especially beneficial for complex visual models
-                                        pass  # Skip update, but continue with sleep
-                                    else:
-                                        # Values changed, update visualization
-                                        self.urdf_vis.update_cfg(joint_positions)
-                                        # Cache the updated positions
-                                        self._last_joint_positions = joint_positions.copy()
+                    if joint_positions is not None:
+                        # Update visualization
+                        # _map_joint_states already returns a properly formatted numpy array
+                        try:
+                            # Ensure array is contiguous (for performance)
+                            if not joint_positions.flags['C_CONTIGUOUS']:
+                                joint_positions = np.ascontiguousarray(joint_positions, dtype=np.float64)
+                            
+                            if self._last_joint_positions is not None:
+                                if np.array_equal(joint_positions, self._last_joint_positions):
+                                    pass  # Skip update, but continue with sleep
                                 else:
-                                    # First update, always perform it
+                                    # Values changed, update visualization
                                     self.urdf_vis.update_cfg(joint_positions)
                                     # Cache the updated positions
                                     self._last_joint_positions = joint_positions.copy()
-                            except Exception as e:
-                                logger.warning(f"Failed to update visualization: {e}")
-                                if logger.isEnabledFor(logging.DEBUG):
-                                    logger.debug(f"Joint positions type: {type(joint_positions)}, "
-                                               f"shape: {getattr(joint_positions, 'shape', 'N/A')}, "
-                                               f"dtype: {getattr(joint_positions, 'dtype', 'N/A')}")
-                                    if hasattr(joint_positions, '__len__') and len(joint_positions) > 0:
-                                        logger.debug(f"First element type: {type(joint_positions[0]) if hasattr(joint_positions, '__getitem__') else 'N/A'}")
-                    else:
-                        # Log periodically if joint state is None
-                        if current_time - last_joint_state_log >= log_interval:
-                            logger.debug("Joint state is None - waiting for joint state messages...")
-                            last_joint_state_log = current_time
-                elif self.urdf_vis is None:
-                    # Log periodically if URDF visualization is not initialized
+                            else:
+                                # First update, always perform it
+                                self.urdf_vis.update_cfg(joint_positions)
+                                # Cache the updated positions
+                                self._last_joint_positions = joint_positions.copy()
+                        except Exception as e:
+                            logger.warning(f"Failed to update visualization: {e}")
+                            if logger.isEnabledFor(logging.DEBUG):
+                                logger.debug(f"Joint positions type: {type(joint_positions)}, "
+                                           f"shape: {getattr(joint_positions, 'shape', 'N/A')}, "
+                                           f"dtype: {getattr(joint_positions, 'dtype', 'N/A')}")
+                                if hasattr(joint_positions, '__len__') and len(joint_positions) > 0:
+                                    logger.debug(f"First element type: {type(joint_positions[0]) if hasattr(joint_positions, '__getitem__') else 'N/A'}")
+                else:
+                    # Log periodically if joint state is None
                     if current_time - last_joint_state_log >= log_interval:
-                        logger.debug("URDF visualization not initialized yet...")
+                        logger.debug("Joint state is None - waiting for joint state messages...")
                         last_joint_state_log = current_time
-                elif self.ros2_interface is None:
-                    # Log periodically if ROS2 interface is not available
-                    if current_time - last_joint_state_log >= log_interval:
-                        logger.debug("ROS2 interface not available...")
-                        last_joint_state_log = current_time
+            elif self.urdf_vis is None:
+                # Log periodically if URDF visualization is not initialized
+                if current_time - last_joint_state_log >= log_interval:
+                    logger.debug("URDF visualization not initialized yet...")
+                    last_joint_state_log = current_time
+            elif self.ros2_interface is None:
+                # Log periodically if ROS2 interface is not available
+                if current_time - last_joint_state_log >= log_interval:
+                    logger.debug("ROS2 interface not available...")
+                    last_joint_state_log = current_time
             
             time.sleep(update_period)
     
@@ -861,11 +849,7 @@ class ROS2ViserVisualizer:
         # Initialize ROS2 Robot Interface (this creates the node and starts executor thread)
         self._init_ros2_interface()
         
-        # Wait for URDF by polling ros2_interface directly (avoiding circular dependency)
-        # We can't wait for _urdf_received because it's only set in _parse_urdf_string,
-        # which is called from _check_robot_description_from_interface in _update_loop,
-        # but _update_loop only starts after URDF is parsed in _init_viser_unlocked.
-        # The ros2_interface already has an executor thread running, so callbacks will be called.
+
         logger.info("Waiting for robot description from topic...")
         max_wait_time = 30.0  # seconds
         start_time = time.time()

@@ -1,13 +1,10 @@
 """Joint Control Panel for ROS2 Viser."""
 
 import logging
-import threading
 from typing import Optional, Dict, List, Any
 from io import StringIO
 
 import viser
-from std_msgs.msg import Int32
-from geometry_msgs.msg import PoseStamped
 import yourdfpy
 
 from ros2_robot_interface import ROS2RobotInterface
@@ -54,11 +51,9 @@ class JointPanel:
         
         # FSM state tracking
         self._current_fsm_command: int = 2  # Default to HOLD
-        self._fsm_state_lock = threading.Lock()
         self._is_joint_control_enabled: bool = False  # Enabled when command is 3 or 4
         
         # Joint state tracking
-        self._joint_state_lock = threading.Lock()
         self._joint_names: List[str] = []
         self._joint_positions: Dict[str, float] = {}
         self._joints_initialized: bool = False
@@ -88,8 +83,7 @@ class JointPanel:
         self._joint_limits: Dict[str, Dict[str, float]] = {}  # joint_name -> {'lower': float, 'upper': float}
         self._joint_limits_initialized: bool = False
         
-        # ROS2 subscriptions - removed direct subscriptions, use ros2_interface methods instead
-        # Note: All data is obtained through ros2_interface methods to avoid duplicate subscriptions
+
         
         # Initialization flag
         self._initialized = False
@@ -119,9 +113,8 @@ class JointPanel:
             if self.ros2_interface is not None and self.ros2_interface.is_connected:
                 try:
                     actual_command = self.ros2_interface.get_fsm_command()
-                    with self._fsm_state_lock:
-                        self._current_fsm_command = actual_command
-                        self._is_joint_control_enabled = (actual_command == 3 or actual_command == 4)
+                    self._current_fsm_command = actual_command
+                    self._is_joint_control_enabled = (actual_command == 3 or actual_command == 4)
                     logger.debug(f"Initialized with actual FSM state: {actual_command}")
                 except Exception as e:
                     logger.debug(f"Could not get initial FSM state from ros2_interface: {e}")
@@ -176,12 +169,11 @@ class JointPanel:
             # Get FSM command from interface
             command = self.ros2_interface.get_fsm_command()
             
-            with self._fsm_state_lock:
-                if command != self._current_fsm_command:
-                    self._current_fsm_command = command
-                    # Enable joint control when command is 3 (OCS2) or 4 (MOVEJ)
-                    self._is_joint_control_enabled = (command == 3 or command == 4)
-                    return True
+            if command != self._current_fsm_command:
+                self._current_fsm_command = command
+                # Enable joint control when command is 3 (OCS2) or 4 (MOVEJ)
+                self._is_joint_control_enabled = (command == 3 or command == 4)
+                return True
             return False
         except Exception as e:
             logger.debug(f"Could not get FSM state from ros2_interface: {e}")
@@ -201,27 +193,24 @@ class JointPanel:
             
             # Check if we need to initialize joints (quick check)
             needs_init = False
-            with self._joint_state_lock:
-                if not self._joints_initialized:
-                    needs_init = True
+            if not self._joints_initialized:
+                needs_init = True
             
             # Initialize joints from categorized state (this will acquire lock internally for data modification)
             # But GUI operations are done outside lock to avoid blocking
             if needs_init:
                 self._initialize_joints_from_categorized(categorized_joint_state)
             
-            # Get control mode status (avoid nested locks)
-            with self._fsm_state_lock:
-                is_control_mode = self._is_joint_control_enabled
+            # Get control mode status
+            is_control_mode = self._is_joint_control_enabled
             
             # Only update from joint state when NOT in control mode
             if not is_control_mode:
                 # Update joint positions from categorized state (quick operation, minimal lock time)
-                updates = {}  # Store updates outside lock
-                with self._joint_state_lock:
-                    if self._joints_initialized:
-                        # Update positions from categorized joint state
-                        for category, joint_data in categorized_joint_state.items():
+                updates = {}  # Store updates
+                if self._joints_initialized:
+                    # Update positions from categorized joint state
+                    for category, joint_data in categorized_joint_state.items():
                             if category == 'timestamp':
                                 continue
                             names = joint_data.get('names', [])
@@ -246,15 +235,13 @@ class JointPanel:
     def _update_target_poses_from_interface(self):
         """Update left/right target poses from ros2_interface (called from update loop, not callback).
         
-        Only updates GUI when target pose actually changes to avoid unnecessary updates.
         Only updates when FSM state is OCS2 (command == 3), as target poses are only relevant in OCS2 mode.
         """
         if self._cleaned_up or self.ros2_interface is None:
             return
         
         # Only update target poses in OCS2 mode (command == 3)
-        with self._fsm_state_lock:
-            current_command = self._current_fsm_command
+        current_command = self._current_fsm_command
         
         if current_command != 3:  # OCS2 mode
             return
@@ -438,69 +425,68 @@ class JointPanel:
         to avoid blocking.
         """
         # Double-check pattern to avoid unnecessary work
-        with self._joint_state_lock:
-            if self._joints_initialized:
-                return
+        if self._joints_initialized:
+            return
+        
+        # Prepare data structures (work done inside lock for thread safety)
+        joint_names_list = []
+        category_to_joints_dict = {}
+        joint_to_category_dict = {}
+        joint_positions_dict = {}
+        
+        # Map ros2_interface categories to joint_panel categories
+        # ros2_interface uses: 'head', 'body', 'left_arm', 'right_arm', 'left_gripper', 'right_gripper', 'arm', 'gripper', 'other'
+        # joint_panel uses: 'head', 'body', 'left', 'right', 'left_hand', 'right_hand'
+        category_mapping = {
+            'head': 'head',
+            'body': 'body',
+            'left_arm': 'left',
+            'right_arm': 'right',
+            'left_gripper': 'left_hand',  # Gripper joints are treated as hand joints
+            'right_gripper': 'right_hand',
+            'arm': 'left',  # Single-arm mode
+            'gripper': 'left_hand',  # Single-arm mode gripper
+        }
+        
+        # Get available categories based on controllers
+        available_categories = set(self._get_available_categories())
+        
+        # Process categorized joints from ros2_interface
+        for ros2_category, joint_data in categorized_joint_state.items():
+            if ros2_category == 'timestamp':
+                continue
             
-            # Prepare data structures (work done inside lock for thread safety)
-            joint_names_list = []
-            category_to_joints_dict = {}
-            joint_to_category_dict = {}
-            joint_positions_dict = {}
+            # Map to joint_panel category
+            panel_category = category_mapping.get(ros2_category)
+            if panel_category is None:
+                continue  # Skip 'other' category
             
-            # Map ros2_interface categories to joint_panel categories
-            # ros2_interface uses: 'head', 'body', 'left_arm', 'right_arm', 'left_gripper', 'right_gripper', 'arm', 'gripper', 'other'
-            # joint_panel uses: 'head', 'body', 'left', 'right', 'left_hand', 'right_hand'
-            category_mapping = {
-                'head': 'head',
-                'body': 'body',
-                'left_arm': 'left',
-                'right_arm': 'right',
-                'left_gripper': 'left_hand',  # Gripper joints are treated as hand joints
-                'right_gripper': 'right_hand',
-                'arm': 'left',  # Single-arm mode
-                'gripper': 'left_hand',  # Single-arm mode gripper
-            }
+            # Only include categories that have controllers available
+            if panel_category not in available_categories:
+                continue
             
-            # Get available categories based on controllers
-            available_categories = set(self._get_available_categories())
+            joint_names = joint_data.get('names', [])
+            positions = joint_data.get('positions', [])
             
-            # Process categorized joints from ros2_interface
-            for ros2_category, joint_data in categorized_joint_state.items():
-                if ros2_category == 'timestamp':
-                    continue
-                
-                # Map to joint_panel category
-                panel_category = category_mapping.get(ros2_category)
-                if panel_category is None:
-                    continue  # Skip 'other' category
-                
-                # Only include categories that have controllers available
-                if panel_category not in available_categories:
-                    continue
-                
-                joint_names = joint_data.get('names', [])
-                positions = joint_data.get('positions', [])
-                
-                # Add joints to data structures
-                for i, joint_name in enumerate(joint_names):
-                    joint_names_list.append(joint_name)
-                    joint_to_category_dict[joint_name] = panel_category
-                    if panel_category not in category_to_joints_dict:
-                        category_to_joints_dict[panel_category] = []
-                    category_to_joints_dict[panel_category].append(joint_name)
-                    # Initialize position from categorized state if available
-                    if i < len(positions):
-                        joint_positions_dict[joint_name] = positions[i]
-                    else:
-                        joint_positions_dict[joint_name] = 0.0
-            
-            # Update shared data structures (quick operation)
-            self._joint_names = joint_names_list
-            self._category_to_joints = category_to_joints_dict
-            self._joint_to_category = joint_to_category_dict
-            self._joint_positions = joint_positions_dict
-            self._joints_initialized = True
+            # Add joints to data structures
+            for i, joint_name in enumerate(joint_names):
+                joint_names_list.append(joint_name)
+                joint_to_category_dict[joint_name] = panel_category
+                if panel_category not in category_to_joints_dict:
+                    category_to_joints_dict[panel_category] = []
+                category_to_joints_dict[panel_category].append(joint_name)
+                # Initialize position from categorized state if available
+                if i < len(positions):
+                    joint_positions_dict[joint_name] = positions[i]
+                else:
+                    joint_positions_dict[joint_name] = 0.0
+        
+        # Update shared data structures (quick operation)
+        self._joint_names = joint_names_list
+        self._category_to_joints = category_to_joints_dict
+        self._joint_to_category = joint_to_category_dict
+        self._joint_positions = joint_positions_dict
+        self._joints_initialized = True
         
         # Log and rebuild GUI OUTSIDE lock to avoid blocking
         logger.info(f"Initialized {len(self._joint_names)} joints for control")
@@ -603,13 +589,11 @@ class JointPanel:
                 pass
         self._right_arm_controls.clear()
         
-        # Get joints for current category (quick access with locks, then release)
-        with self._fsm_state_lock:
-            current_command = self._current_fsm_command
+        # Get joints for current category
+        current_command = self._current_fsm_command
         
-        # Get joints to show (quick access, then release lock before GUI operations)
-        with self._joint_state_lock:
-            joints_to_show = list(self._category_to_joints.get(self._current_category, []))  # Copy
+        # Get joints to show
+        joints_to_show = list(self._category_to_joints.get(self._current_category, []))  # Copy
         
         # For left/right category:
         # - OCS2 mode (command == 3): show pose controls
@@ -680,8 +664,7 @@ class JointPanel:
             return
         
         # Get current position
-        with self._joint_state_lock:
-            current_pos = self._joint_positions.get(joint_name, 0.0)
+        current_pos = self._joint_positions.get(joint_name, 0.0)
         
         # Get joint limits from URDF, fallback to default if not available
         if joint_name in self._joint_limits:
@@ -811,8 +794,7 @@ class JointPanel:
         if not self._joints_initialized:
             return
         
-        with self._fsm_state_lock:
-            current_command = self._current_fsm_command
+        current_command = self._current_fsm_command
         
         # Handle left arm in OCS2 mode
         if current_command == 3 and self._current_category == "left":
@@ -828,7 +810,7 @@ class JointPanel:
                 pose.orientation.w = self._left_arm_controls.get('qw').value if 'qw' in self._left_arm_controls else 1.0
                 
                 # Get frame_id from current_target to keep synchronization
-                frame_id = self.ros2_interface.left_arm_handler.get_target_frame_id()
+                frame_id = self.ros2_interface.left_arm_handler.get_frame_id()
                 if frame_id:
                     self.ros2_interface.left_arm_handler.send_target_stamped(frame_id, pose)
                     logger.info(f"Published left arm end-effector target (OCS2 mode) in frame '{frame_id}'")
@@ -852,7 +834,7 @@ class JointPanel:
                 pose.orientation.w = self._right_arm_controls.get('qw').value if 'qw' in self._right_arm_controls else 1.0
                 
                 # Get frame_id from current_target to keep synchronization
-                frame_id = self.ros2_interface.right_arm_handler.get_target_frame_id()
+                frame_id = self.ros2_interface.right_arm_handler.get_frame_id()
                 if frame_id:
                     self.ros2_interface.right_arm_handler.send_target_stamped(frame_id, pose)
                     logger.info(f"Published right arm end-effector target (OCS2 mode) in frame '{frame_id}'")
@@ -862,9 +844,8 @@ class JointPanel:
                     logger.info("Published right arm end-effector target (OCS2 mode, no frame_id available)")
             return
         
-        # Handle joint position control for other categories (quick access with lock)
-        with self._joint_state_lock:
-            joint_names = list(self._category_to_joints.get(self._current_category, []))  # Copy
+        # Handle joint position control for other categories
+        joint_names = list(self._category_to_joints.get(self._current_category, []))  # Copy
         
         if not joint_names:
             return
@@ -876,8 +857,7 @@ class JointPanel:
                 slider = self._joint_controls[joint_name]['slider']
                 positions.append(slider.value)
             else:
-                with self._joint_state_lock:
-                    positions.append(self._joint_positions.get(joint_name, 0.0))
+                positions.append(self._joint_positions.get(joint_name, 0.0))
         
         # Publish based on category
         if self._current_category == "head":
@@ -916,20 +896,18 @@ class JointPanel:
         
         try:
             # Update FSM state from interface (non-blocking, called from main loop)
-            # Only update joint state when FSM state changes
             fsm_state_changed = self._update_fsm_state_from_interface()
             
-            # Update joint state from interface only when FSM state changes
-            # This avoids unnecessary computation on every update cycle
-            if fsm_state_changed:
+            # Update joint state from interface when FSM state changes OR when joints are not initialized
+            # This ensures joints are initialized even if FSM state doesn't change
+            if fsm_state_changed or not self._joints_initialized:
                 self._update_joint_state_from_interface()
             
             # Update target poses from interface (for OCS2 mode)
             self._update_target_poses_from_interface()
             
-            with self._fsm_state_lock:
-                is_enabled = self._is_joint_control_enabled
-                current_command = self._current_fsm_command
+            is_enabled = self._is_joint_control_enabled
+            current_command = self._current_fsm_command
             
             # Update status text
             if self._status_text is not None:

@@ -1,7 +1,6 @@
 """FSM Control Panel for ROS2 Viser."""
 
 import logging
-import threading
 import time
 from typing import Optional
 
@@ -50,7 +49,6 @@ class FSMPanel:
         
         # FSM state tracking
         self._current_fsm_state: str = "HOLD"
-        self._fsm_state_lock = threading.Lock()
         
         # GUI elements
         self._fsm_state_label: Optional[viser.GuiTextHandle] = None
@@ -88,8 +86,7 @@ class FSMPanel:
                     # Only update if state is valid (HOME, HOLD, OCS2, MOVEJ)
                     valid_states = {"HOME", "HOLD", "OCS2", "MOVEJ"}
                     if actual_state in valid_states:
-                        with self._fsm_state_lock:
-                            self._current_fsm_state = actual_state
+                        self._current_fsm_state = actual_state
                         logger.debug(f"Initialized with actual FSM state: {actual_state}")
                 except Exception as e:
                     logger.debug(f"Could not get initial FSM state from ros2_interface: {e}")
@@ -184,8 +181,7 @@ class FSMPanel:
             
             # Update state if expected
             if expected_state:
-                with self._fsm_state_lock:
-                    self._current_fsm_state = expected_state
+                self._current_fsm_state = expected_state
                 # Note: update() will be called from the main update loop
         except Exception as e:
             logger.error(f"Failed to send FSM command: {e}", exc_info=True)
@@ -208,10 +204,9 @@ class FSMPanel:
                     # For special commands (100, 0, etc.), keep the previous state
                     valid_states = {"HOME", "HOLD", "OCS2", "MOVEJ"}
                     if current_state in valid_states:
-                        with self._fsm_state_lock:
-                            if current_state != self._current_fsm_state:
-                                logger.debug(f"FSM state changed: {self._current_fsm_state} → {current_state}")
-                                self._current_fsm_state = current_state
+                        if current_state != self._current_fsm_state:
+                            logger.debug(f"FSM state changed: {self._current_fsm_state} → {current_state}")
+                            self._current_fsm_state = current_state
                     else:
                         # Unknown state (e.g., from command 100 or 0), keep previous state
                         logger.debug(f"FSM command returned unknown state '{current_state}', keeping previous state '{self._current_fsm_state}'")
@@ -223,8 +218,7 @@ class FSMPanel:
                 pass
             
             # Use cached state for display
-            with self._fsm_state_lock:
-                current_state = self._current_fsm_state
+            current_state = self._current_fsm_state
             
             # Update state label
             if self._fsm_state_label is not None:

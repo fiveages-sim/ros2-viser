@@ -1,7 +1,6 @@
 """Gripper Control Panel for ROS2 Viser."""
 
 import logging
-import threading
 from enum import Enum
 from typing import Optional
 
@@ -54,7 +53,6 @@ class GripperPanel:
         # Gripper state tracking
         self._left_gripper_open: bool = False
         self._right_gripper_open: bool = False
-        self._gripper_state_lock = threading.Lock()
         
         # Detect dual-arm mode
         self._is_dual_arm: bool = False
@@ -264,9 +262,8 @@ class GripperPanel:
         has_left = self.ros2_interface.left_gripper_handler is not None
         has_right = self.ros2_interface.right_gripper_handler is not None
         
-        with self._gripper_state_lock:
-            left_open = self._left_gripper_open
-            right_open = self._right_gripper_open
+        left_open = self._left_gripper_open
+        right_open = self._right_gripper_open
         
         if not has_left and not has_right:
             # No grippers: hide all buttons
@@ -350,31 +347,23 @@ class GripperPanel:
             # Get state from gripper handlers (they subscribe to target_command internally)
             if self.ros2_interface.left_gripper_handler is not None:
                 try:
-                    with self.ros2_interface.left_gripper_handler.data_lock:
-                        left_open = self.ros2_interface.left_gripper_handler.is_open
-                    with self._gripper_state_lock:
-                        self._left_gripper_open = left_open
+                    left_open = self.ros2_interface.left_gripper_handler.is_open
+                    self._left_gripper_open = left_open
                 except Exception as e:
                     logger.debug(f"Could not get left gripper state from handler: {e}")
-                    with self._gripper_state_lock:
-                        left_open = self._left_gripper_open
-            else:
-                with self._gripper_state_lock:
                     left_open = self._left_gripper_open
+            else:
+                left_open = self._left_gripper_open
             
             if self.ros2_interface.right_gripper_handler is not None:
                 try:
-                    with self.ros2_interface.right_gripper_handler.data_lock:
-                        right_open = self.ros2_interface.right_gripper_handler.is_open
-                    with self._gripper_state_lock:
-                        self._right_gripper_open = right_open
+                    right_open = self.ros2_interface.right_gripper_handler.is_open
+                    self._right_gripper_open = right_open
                 except Exception as e:
                     logger.debug(f"Could not get right gripper state from handler: {e}")
-                    with self._gripper_state_lock:
-                        right_open = self._right_gripper_open
-            else:
-                with self._gripper_state_lock:
                     right_open = self._right_gripper_open
+            else:
+                right_open = self._right_gripper_open
             
             # Update button visibility based on current state
             # Left gripper
