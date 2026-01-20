@@ -1,7 +1,6 @@
 """Configuration for ROS2 Viser visualizer."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -33,10 +32,6 @@ class ROS2ViserConfig:
     
     auto_connect: bool = True
     """Whether to automatically connect to ROS2 interface."""
-    
-    # Optional: Use existing ROS2RobotInterface instance
-    ros2_interface: Optional[object] = None
-    """Optional: Use existing ROS2RobotInterface instance instead of creating new one."""
     
     enable_fsm_panel: bool = True
     """Whether to enable FSM (Finite State Machine) control panel. Default: True"""

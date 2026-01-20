@@ -87,6 +87,16 @@ class GripperPanel:
             # Detect gripper availability and mode
             self._detect_grippers()
             
+            # Check if any gripper controllers are available
+            has_left = self.ros2_interface.left_gripper_handler is not None if self.ros2_interface else False
+            has_right = self.ros2_interface.right_gripper_handler is not None if self.ros2_interface else False
+            
+            # Only initialize if at least one gripper controller is detected
+            if not has_left and not has_right:
+                logger.info("No gripper controllers detected, skipping Gripper panel initialization")
+                self._initialized = False
+                return
+            
             # Initialize GUI
             self._init_gui()
             
@@ -113,6 +123,22 @@ class GripperPanel:
         has_left = self.ros2_interface.left_gripper_handler is not None
         has_right = self.ros2_interface.right_gripper_handler is not None
         
+        # Also check config to see if controllers were detected but handlers not created
+        left_controller_detected = (
+            self.ros2_interface.config.left_gripper_controller_name is not None or
+            self.ros2_interface.config.gripper_command_topic is not None
+        )
+        right_controller_detected = (
+            self.ros2_interface.config.right_gripper_controller_name is not None or
+            self.ros2_interface.config.right_gripper_command_topic is not None
+        )
+        
+        # Log detection details for debugging
+        if left_controller_detected and not has_left:
+            logger.warning(f"Left gripper controller detected ({self.ros2_interface.config.left_gripper_controller_name or self.ros2_interface.config.gripper_command_topic}) but handler not created (gripper_enabled={self.ros2_interface.config.gripper_enabled})")
+        if right_controller_detected and not has_right:
+            logger.warning(f"Right gripper controller detected ({self.ros2_interface.config.right_gripper_controller_name or self.ros2_interface.config.right_gripper_command_topic}) but handler not created (gripper_enabled={self.ros2_interface.config.gripper_enabled})")
+        
         self._is_dual_arm = has_left and has_right
         
         if not has_left and not has_right:
@@ -120,7 +146,12 @@ class GripperPanel:
         elif self._is_dual_arm:
             logger.info("Detected mode: DUAL-ARM (left and right grippers)")
         else:
-            logger.info("Detected mode: SINGLE-ARM (left gripper only)")
+            if has_left and not has_right:
+                logger.info("Detected mode: SINGLE-ARM (left gripper only)")
+            elif has_right and not has_left:
+                logger.info("Detected mode: SINGLE-ARM (right gripper only)")
+            else:
+                logger.info("Detected mode: SINGLE-ARM")
     
     def _init_gui(self):
         """Initialize Gripper control panel GUI elements."""
@@ -128,12 +159,21 @@ class GripperPanel:
             return
         
         try:
+            # Check if any gripper controllers are available
+            has_left = self.ros2_interface.left_gripper_handler is not None
+            has_right = self.ros2_interface.right_gripper_handler is not None
+            
+            # Only create panel if at least one gripper controller is detected
+            if not has_left and not has_right:
+                logger.info("No gripper controllers detected, skipping EE Control panel")
+                return
+            
             # Get display names from controller names
-            if self.ros2_interface.left_gripper_handler is not None:
+            if has_left:
                 left_controller_name = self.ros2_interface.config.left_gripper_controller_name
                 self._left_display_name = self._get_display_name(left_controller_name)
             
-            if self.ros2_interface.right_gripper_handler is not None:
+            if has_right:
                 right_controller_name = self.ros2_interface.config.right_gripper_controller_name
                 self._right_display_name = self._get_display_name(right_controller_name)
             

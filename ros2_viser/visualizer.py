@@ -248,31 +248,18 @@ class ROS2ViserVisualizer:
                     logger.error(f"URDF data preview (first 500 chars): {urdf_string[:500]}")
     
     def _init_ros2_interface(self):
-        """Initialize ROS2 Robot Interface if needed."""
-        if self.config.ros2_interface is not None:
-            # Use existing interface
-            self.ros2_interface = self.config.ros2_interface
-            self._own_interface = False
-            logger.info("Using provided ROS2RobotInterface instance")
-            
-            # Ensure it's connected
-            if not self.ros2_interface.is_connected:
-                logger.warning("Provided ROS2RobotInterface is not connected, connecting now...")
-                self.ros2_interface.connect()
-        else:
-            # Create new interface
-            interface_config = ROS2RobotInterfaceConfig(
-                joint_states_topic=self.config.joint_states_topic,
-                # These are required but not used for visualization
-                end_effector_pose_topic="/dummy_pose",
-                end_effector_target_topic="/dummy_target",
-            )
-            self.ros2_interface = ROS2RobotInterface(interface_config)
-            self._own_interface = True
-            
-            if self.config.auto_connect:
-                self.ros2_interface.connect()
-                logger.info("Connected to ROS2 Robot Interface")
+        """Initialize ROS2 Robot Interface."""
+        interface_config = ROS2RobotInterfaceConfig(
+            joint_states_topic=self.config.joint_states_topic,
+            node_name="ros2_viser_node",
+            gripper_enabled=self.config.enable_gripper_panel,
+        )
+        self.ros2_interface = ROS2RobotInterface(interface_config)
+        self._own_interface = True
+        
+        if self.config.auto_connect:
+            self.ros2_interface.connect()
+            logger.info("Connected to ROS2 Robot Interface")
         
         # Initialize robot description subscription using the interface's node
         self._init_robot_description_subscription()
@@ -374,44 +361,6 @@ class ROS2ViserVisualizer:
             if self.server is None:
                 try:
                     self.server = viser.ViserServer()
-                    
-                    # Try to get server URL/port information
-                    server_url = None
-                    try:
-                        # Check various possible attributes
-                        if hasattr(self.server, 'url'):
-                            server_url = self.server.url
-                        elif hasattr(self.server, '_url'):
-                            server_url = self.server._url
-                        elif hasattr(self.server, 'port'):
-                            port = self.server.port
-                            server_url = f"http://localhost:{port}"
-                        elif hasattr(self.server, '_port'):
-                            port = self.server._port
-                            server_url = f"http://localhost:{port}"
-                    except Exception as e:
-                        logger.debug(f"Could not get server URL from attributes: {e}")
-                    
-                    # Print server information
-                    if server_url:
-                        print(f"\n{'='*60}")
-                        print(f"✅ Viser visualization server is running!")
-                        print(f"🌐 Open your browser and navigate to: {server_url}")
-                        print(f"{'='*60}\n")
-                    else:
-                        # Default ports to try
-                        default_urls = [
-                            "http://localhost:8080",
-                            "http://localhost:8010",
-                            "http://localhost:8000"
-                        ]
-                        print(f"\n{'='*60}")
-                        print(f"✅ Viser visualization server is running!")
-                        print(f"🌐 Try opening one of these URLs in your browser:")
-                        for url in default_urls:
-                            print(f"   - {url}")
-                        print(f"{'='*60}\n")
-                        
                 except Exception as e:
                     logger.error(f"Failed to create Viser server: {e}", exc_info=True)
                     raise
@@ -488,14 +437,18 @@ class ROS2ViserVisualizer:
             if needs_reconnect and self._own_interface and self.ros2_interface is not None:
                 logger.info("Reconnecting ROS2RobotInterface to detect new controllers/topics...")
                 try:
-                    # Disconnect and reconnect to re-detect configuration
-                    # This is safe to do in the update loop thread (not in ROS2 callback thread)
+                    # Disconnect old interface
                     self.ros2_interface.disconnect()
-                    self.ros2_interface.connect()
-                    logger.info("✅ ROS2RobotInterface reconnected successfully")
                     
-                    # Reinitialize robot description subscription (old subscription was destroyed)
-                    self._init_robot_description_subscription()
+                    # Wait a bit for ROS2 to clean up old topic registrations
+                    # This prevents detecting stale topics from the previous connection
+                    time.sleep(0.5)
+                    
+                    # Recreate interface with current configuration to ensure latest settings
+                    # This ensures gripper_enabled and other settings are up to date
+                    self._init_ros2_interface()
+                    
+                    logger.info("✅ ROS2RobotInterface reconnected successfully")
                     
                     # Reinitialize panels that depend on ros2_interface configuration
                     self._reinitialize_panels()
