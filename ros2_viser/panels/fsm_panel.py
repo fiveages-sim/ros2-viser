@@ -6,8 +6,6 @@ import time
 from typing import Optional
 
 import viser
-from rclpy.subscription import Subscription
-from std_msgs.msg import Int32
 
 from ros2_robot_interface import ROS2RobotInterface
 
@@ -61,8 +59,7 @@ class FSMPanel:
         # Folder handle for cleanup
         self._folder_handle: Optional[viser.GuiFolderHandle] = None
         
-        # ROS2 subscription (keep reference to prevent garbage collection)
-        self._fsm_command_subscription: Optional[Subscription] = None
+        # Note: No direct subscription - use ros2_interface.get_fsm_state() instead
         
         # Initialization flag
         self._initialized = False
@@ -81,11 +78,21 @@ class FSMPanel:
             # Reset cleanup flag
             self._cleaned_up = False
             
-            # Initialize ROS2 subscription first
-            self._init_fsm_subscription()
-            
             # Initialize GUI
             self._init_gui()
+            
+            # If ros2_interface is already connected, get actual FSM state instead of using default
+            if self.ros2_interface is not None and self.ros2_interface.is_connected:
+                try:
+                    actual_state = self.ros2_interface.get_fsm_state()
+                    # Only update if state is valid (HOME, HOLD, OCS2, MOVEJ)
+                    valid_states = {"HOME", "HOLD", "OCS2", "MOVEJ"}
+                    if actual_state in valid_states:
+                        with self._fsm_state_lock:
+                            self._current_fsm_state = actual_state
+                        logger.debug(f"Initialized with actual FSM state: {actual_state}")
+                except Exception as e:
+                    logger.debug(f"Could not get initial FSM state from ros2_interface: {e}")
             
             # Initial update to set button visibility
             self.update()
@@ -96,75 +103,6 @@ class FSMPanel:
         except Exception as e:
             logger.error(f"Failed to initialize FSM panel: {e}", exc_info=True)
             raise
-    
-    def _init_fsm_subscription(self):
-        """Initialize ROS2 subscription to FSM command topic for state tracking."""
-        if self.ros2_interface is None or not self.ros2_interface.is_connected:
-            logger.warning("ROS2RobotInterface not connected, cannot subscribe to FSM commands")
-            return
-        
-        ros2_node = self.ros2_interface.robot_node
-        if ros2_node is None:
-            logger.warning("ROS2RobotInterface node not available")
-            return
-        
-        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-        
-        qos_profile = QoSProfile(
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST
-        )
-        
-        # Save subscription to prevent garbage collection
-        self._fsm_command_subscription = ros2_node.create_subscription(
-            Int32,
-            self.fsm_command_topic,
-            self._fsm_command_callback,
-            qos_profile
-        )
-        
-        logger.info(f"✅ Subscribed to {self.fsm_command_topic} for FSM state tracking")
-    
-    def _fsm_command_callback(self, msg: Int32):
-        """Callback for FSM command messages to track current state.
-        
-        Note: We track commands to infer state, but the actual state might differ
-        if commands are sent from multiple sources. This is a best-effort approach.
-        
-        IMPORTANT: This callback runs in the ROS2 executor thread. We should NOT
-        call GUI operations directly here as they may block or cause deadlocks.
-        Instead, we only update the state, and GUI updates happen in the update() method.
-        """
-        # Check if panel has been cleaned up
-        if self._cleaned_up:
-            return
-        
-        try:
-            command = msg.data
-            
-            # Map command to target state name
-            # Commands 0 and 100 are special (SWITCH/REST), don't change state directly
-            state_map = {
-                1: "HOME",
-                2: "HOLD",
-                3: "OCS2",
-                4: "MOVEJ",
-            }
-            
-            # Only update state for direct state commands (1-4)
-            if command in state_map:
-                new_state = state_map[command]
-                
-                with self._fsm_state_lock:
-                    if new_state != self._current_fsm_state:
-                        logger.debug(f"FSM state changed: {self._current_fsm_state} → {new_state}")
-                        self._current_fsm_state = new_state
-                        # Don't update GUI here - let update() handle it
-                        # GUI operations in ROS2 callbacks can cause issues
-        except Exception as e:
-            # Catch all exceptions to prevent executor from stopping
-            logger.error(f"Error in FSM command callback: {e}", exc_info=True)
     
     def _init_gui(self):
         """Initialize FSM control panel GUI elements."""
@@ -262,6 +200,29 @@ class FSMPanel:
             return
         
         try:
+            # Get FSM state from ros2_interface
+            if self.ros2_interface is not None and self.ros2_interface.is_connected:
+                try:
+                    current_state = self.ros2_interface.get_fsm_state()
+                    # Only update if state is in known valid states (HOME, HOLD, OCS2, MOVEJ)
+                    # For special commands (100, 0, etc.), keep the previous state
+                    valid_states = {"HOME", "HOLD", "OCS2", "MOVEJ"}
+                    if current_state in valid_states:
+                        with self._fsm_state_lock:
+                            if current_state != self._current_fsm_state:
+                                logger.debug(f"FSM state changed: {self._current_fsm_state} → {current_state}")
+                                self._current_fsm_state = current_state
+                    else:
+                        # Unknown state (e.g., from command 100 or 0), keep previous state
+                        logger.debug(f"FSM command returned unknown state '{current_state}', keeping previous state '{self._current_fsm_state}'")
+                except Exception as e:
+                    logger.debug(f"Could not get FSM state from ros2_interface: {e}")
+                    # Fall back to cached state
+            else:
+                # Fall back to cached state if interface not available
+                pass
+            
+            # Use cached state for display
             with self._fsm_state_lock:
                 current_state = self._current_fsm_state
             
@@ -425,14 +386,7 @@ class FSMPanel:
         except Exception as e:
             logger.warning(f"Error hiding FSM panel GUI elements: {e}")
         
-        # Cleanup ROS2 subscription
-        # Don't destroy subscription immediately - executor may still be using it
-        # Just clear the reference and let it be garbage collected when executor is done
-        # The _cleaned_up flag will prevent callbacks from doing anything
-        if self._fsm_command_subscription is not None:
-            # Don't destroy here - let ROS2 handle cleanup when node is destroyed
-            # Just clear the reference so we don't try to use it
-            self._fsm_command_subscription = None
+        # Note: No direct subscription to cleanup - ros2_interface handles it
         
         # Clear references
         self._fsm_state_label = None

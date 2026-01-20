@@ -39,6 +39,22 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "right_gripper": "右夹爪",
         "gripper": "夹爪",
         
+        # Joint Panel
+        "joint_control": "关节控制",
+        "joint_category": "关节类别",
+        "all": "全部",
+        "category_body": "身体",
+        "category_head": "头部",
+        "category_left": "左臂",
+        "category_right": "右臂",
+        "category_left_hand": "左手",
+        "category_right_hand": "右手",
+        "send_joint_positions": "发送目标位置",
+        "status": "状态",
+        "waiting_for_joints": "等待关节初始化",
+        "switch_to_joint_control_state": "请切换到支持关节控制的状态 (OCS2 或 MOVEJ)",
+        "ready": "就绪",
+        
         # Messages
         "no_collision_meshes": "URDF 中没有碰撞网格",
         "collision_meshes_loaded": "碰撞网格已加载",
@@ -63,6 +79,22 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "left_gripper": "Left Gripper",
         "right_gripper": "Right Gripper",
         "gripper": "Gripper",
+        
+        # Joint Panel
+        "joint_control": "Joint Control",
+        "joint_category": "Joint Category",
+        "all": "All",
+        "category_body": "Body",
+        "category_head": "Head",
+        "category_left": "Left",
+        "category_right": "Right",
+        "category_left_hand": "Left Hand",
+        "category_right_hand": "Right Hand",
+        "send_joint_positions": "Send Joint Positions",
+        "status": "Status",
+        "waiting_for_joints": "Waiting for joints initialization",
+        "switch_to_joint_control_state": "Please switch to joint control state (OCS2 or MOVEJ)",
+        "ready": "Ready",
         
         # Messages
         "no_collision_meshes": "No collision meshes in URDF",

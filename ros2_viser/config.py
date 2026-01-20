@@ -42,5 +42,8 @@ class ROS2ViserConfig:
     enable_gripper_panel: bool = True
     """Whether to enable Gripper control panel. Default: True"""
     
+    enable_joint_panel: bool = True
+    """Whether to enable Joint control panel. Default: True"""
+    
     language: str = "zh"
     """Language for GUI labels. Options: "zh" (Chinese) or "en" (English). Default: "zh" """

@@ -11,15 +11,13 @@ from typing import Optional
 import numpy as np
 import viser
 from rclpy.node import Node
-from rclpy.subscription import Subscription
-from std_msgs.msg import String
 from viser.extras import ViserUrdf
 import yourdfpy
 
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
 from .config import ROS2ViserConfig
-from .panels import FSMPanel, GripperPanel
+from .panels import FSMPanel, GripperPanel, JointPanel
 from .i18n import Translator, get_translator, set_global_language
 
 logger = logging.getLogger(__name__)
@@ -91,9 +89,13 @@ class ROS2ViserVisualizer:
         # Precomputed mapping for performance optimization
         self._joint_name_to_urdf_index: dict[str, int] = {}  # Maps joint name to URDF index (computed once)
         
+        # Cache last joint positions to avoid unnecessary updates
+        self._last_joint_positions: Optional[np.ndarray] = None
+        
         # GUI panels
         self._fsm_panel: Optional[FSMPanel] = None
         self._gripper_panel: Optional[GripperPanel] = None
+        self._joint_panel: Optional[JointPanel] = None
         
         # Display control panel
         self._display_folder_handle: Optional[viser.GuiFolderHandle] = None
@@ -103,60 +105,7 @@ class ROS2ViserVisualizer:
         self._show_visual: bool = True
         self._show_collision: bool = False
         
-        # Keep references to subscriptions to prevent garbage collection
-        self._robot_description_subscription: Optional[Subscription] = None
-    
-    def _init_robot_description_subscription(self):
-        """Initialize robot description subscription using ros2_interface's node."""
-        if self.ros2_interface is None or not self.ros2_interface.is_connected:
-            logger.warning("ROS2RobotInterface not connected, cannot subscribe to robot_description")
-            return
-        
-        # Get the node from ros2_interface
-        ros2_node = self.ros2_interface.robot_node
-        if ros2_node is None:
-            logger.warning("ROS2RobotInterface node not available")
-            return
-        
-        logger.info(f"Setting up subscription to {self.config.robot_description_topic}...")
-        
-        # Subscribe to robot description topic
-        # Use TRANSIENT_LOCAL durability to receive latched messages
-        from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
-        
-        qos_profile = QoSProfile(
-            depth=10,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,  # Receive latched messages
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST
-        )
-        
-        # Save subscription to prevent garbage collection
-        self._robot_description_subscription = ros2_node.create_subscription(
-            String,
-            self.config.robot_description_topic,
-            self._robot_description_callback,
-            qos_profile
-        )
-        
-        logger.info(f"✅ Subscribed to {self.config.robot_description_topic}")
-        
-        # Check if executor is running (needed to receive messages)
-        if not (hasattr(self.ros2_interface, 'executor') and self.ros2_interface.executor is not None):
-            logger.warning(f"⚠️  ROS2RobotInterface executor may not be running - messages won't be received!")
-        
-        # Check if topic exists
-        try:
-            topic_names = ros2_node.get_topic_names_and_types()
-            topic_list = [name for name, _ in topic_names]
-            if self.config.robot_description_topic not in topic_list:
-                logger.warning(f"⚠️  Topic {self.config.robot_description_topic} not found in available topics")
-        except Exception as e:
-            logger.debug(f"Could not check topic availability: {e}")
-        
-        # Give executor a moment to process the subscription
-        import time
-        time.sleep(0.5)
+        # Note: No direct subscription - use ros2_interface.get_robot_description() instead
     
     def _parse_urdf_string(self, urdf_string: str, urdf_hash: Optional[str] = None):
         """Parse URDF string and initialize/reload visualization.
@@ -273,11 +222,21 @@ class ROS2ViserVisualizer:
                 # Note: We're already inside _urdf_lock, so call the unlocked version
                 self._init_viser_unlocked()
                 
+                # Update joint_panel with URDF if it was created before URDF was loaded
+                if self._joint_panel is not None and self.urdf is not None:
+                    self._joint_panel.set_urdf(self.urdf)
+                
             except Exception as e:
                 logger.error(f"Failed to parse URDF: {e}", exc_info=True)
                 logger.error(f"URDF data length: {len(urdf_string) if urdf_string else 0}")
                 if urdf_string:
                     logger.error(f"URDF data preview (first 500 chars): {urdf_string[:500]}")
+                return
+        
+        # Give server a moment to fully start (outside lock to avoid holding it too long)
+        # This is safe because the update thread was already started in _init_viser_unlocked()
+        # and it will wait for the lock if needed
+        time.sleep(0.5)
     
     def _init_ros2_interface(self):
         """Initialize ROS2 Robot Interface."""
@@ -293,46 +252,45 @@ class ROS2ViserVisualizer:
             self.ros2_interface.connect()
             logger.info("Connected to ROS2 Robot Interface")
         
-        # Initialize robot description subscription using the interface's node
-        self._init_robot_description_subscription()
+        # Note: Robot description is now tracked by ros2_interface
+        # We'll poll it in the update loop or wait for it to be available
     
-    def _robot_description_callback(self, msg: String):
-        """Callback for robot description (URDF) messages.
+    def _check_robot_description_from_interface(self):
+        """Check robot description from ros2_interface (called from update loop, not callback).
         
-        This callback handles both initial URDF loading and automatic reloading
-        when the robot description changes.
-        
-        IMPORTANT: This callback runs in the ROS2 executor thread. We should
-        avoid long-running operations here. URDF parsing is done in a separate
-        thread-safe manner.
+        This method checks if robot description has been received or changed,
+        and triggers URDF parsing if needed.
         """
+        if self.ros2_interface is None or not self.ros2_interface.is_connected:
+            return
+        
         try:
-            logger.debug(f"Robot description callback triggered (message length: {len(msg.data) if msg.data else 0})")
+            # Get robot description from interface
+            robot_description = self.ros2_interface.get_robot_description()
+            if robot_description is None:
+                return
             
-            # Check if message data is empty or None
-            if not msg.data or len(msg.data.strip()) == 0:
-                logger.warning("Received empty robot description message")
+            # Check if message data is empty
+            if not robot_description or len(robot_description.strip()) == 0:
                 return
             
             # Compute hash to detect changes
-            urdf_hash = hashlib.md5(msg.data.encode()).hexdigest()
+            urdf_hash = hashlib.md5(robot_description.encode()).hexdigest()
             
             # Check if URDF has changed
             if self._last_urdf_hash is not None and urdf_hash == self._last_urdf_hash:
                 # URDF hasn't changed, skip
-                logger.debug("URDF hasn't changed, skipping")
                 return
             
             if not self._urdf_received:
-                logger.info(f"✅ Received robot description (length: {len(msg.data)} characters)")
+                logger.info(f"✅ Received robot description (length: {len(robot_description)} characters)")
             else:
                 logger.info("URDF changed, reloading visualization...")
             
             # Parse and reload URDF (this is thread-safe and handles locks internally)
-            self._parse_urdf_string(msg.data, urdf_hash)
+            self._parse_urdf_string(robot_description, urdf_hash)
         except Exception as e:
-            # Catch all exceptions to prevent executor from stopping
-            logger.error(f"Error in robot description callback: {e}", exc_info=True)
+            logger.error(f"Error checking robot description from interface: {e}", exc_info=True)
     
     def _reinitialize_panels(self):
         """Reinitialize panels after ROS2 interface reconnection.
@@ -356,6 +314,13 @@ class ROS2ViserVisualizer:
                     logger.warning(f"Error cleaning up Gripper panel during reinit: {e}")
                 self._gripper_panel = None
             
+            if self._joint_panel is not None:
+                try:
+                    self._joint_panel.cleanup()
+                except Exception as e:
+                    logger.warning(f"Error cleaning up Joint panel during reinit: {e}")
+                self._joint_panel = None
+            
             # Reinitialize panels if enabled
             if self.config.enable_fsm_panel:
                 self._fsm_panel = FSMPanel(
@@ -373,6 +338,15 @@ class ROS2ViserVisualizer:
                 )
                 self._gripper_panel.initialize()
                 logger.info("✅ Gripper panel reinitialized")
+            
+            if self.config.enable_joint_panel:
+                self._joint_panel = JointPanel(
+                    self.server,
+                    self.ros2_interface,
+                    urdf=self.urdf  # Pass pre-parsed URDF to avoid re-parsing
+                )
+                self._joint_panel.initialize()
+                logger.info("✅ Joint panel reinitialized")
                 
         except Exception as e:
             logger.error(f"Failed to reinitialize panels: {e}", exc_info=True)
@@ -412,6 +386,13 @@ class ROS2ViserVisualizer:
                     logger.info("✅ Gripper panel labels updated with new language")
                 except Exception as e:
                     logger.warning(f"Failed to update Gripper panel labels: {e}")
+            
+            if self.config.enable_joint_panel and self._joint_panel is not None:
+                try:
+                    self._joint_panel.update_gui_labels()
+                    logger.info("✅ Joint panel labels updated with new language")
+                except Exception as e:
+                    logger.warning(f"Failed to update Joint panel labels: {e}")
                 
         except Exception as e:
             logger.error(f"Failed to update panels with new language: {e}", exc_info=True)
@@ -630,6 +611,14 @@ class ROS2ViserVisualizer:
                         self.ros2_interface
                     )
                     self._gripper_panel.initialize()
+                
+                if self.config.enable_joint_panel and self._joint_panel is None:
+                    self._joint_panel = JointPanel(
+                        self.server,
+                        self.ros2_interface,
+                        urdf=self.urdf  # Pass pre-parsed URDF to avoid re-parsing
+                    )
+                    self._joint_panel.initialize()
             
             # Create URDF visualization
             logger.debug(f"Creating ViserUrdf with {len(self.urdf_all_joint_names)} joints...")
@@ -666,6 +655,8 @@ class ROS2ViserVisualizer:
                 raise
             
             # Start update loop if not already running
+            # Note: The sleep after starting the thread is done outside this method
+            # to avoid holding the lock for too long
             if self._update_thread is None or not self._update_thread.is_alive():
                 self._update_thread = threading.Thread(
                     target=self._update_loop,
@@ -673,9 +664,6 @@ class ROS2ViserVisualizer:
                 )
                 self._update_thread.start()
                 logger.debug("Update loop started")
-            
-            # Give server a moment to fully start
-            time.sleep(0.5)
                 
         except Exception as e:
             logger.error(f"Failed to initialize Viser: {e}", exc_info=True)
@@ -687,12 +675,21 @@ class ROS2ViserVisualizer:
         last_joint_state_log = 0.0
         last_fsm_panel_update = 0.0
         last_gripper_panel_update = 0.0
+        last_joint_panel_update = 0.0
         log_interval = 5.0  # Log joint state status every 5 seconds
         fsm_panel_update_interval = 0.1  # Update FSM panel every 100ms
         gripper_panel_update_interval = 0.1  # Update Gripper panel every 100ms
+        joint_panel_update_interval = 0.1  # Update Joint panel every 100ms
         
         while self._running:
             current_time = time.time()
+            
+            # Check robot description from interface (non-blocking, called from main loop)
+            if self.ros2_interface is not None and self.ros2_interface.is_connected:
+                try:
+                    self._check_robot_description_from_interface()
+                except Exception as e:
+                    logger.debug(f"Error checking robot description: {e}")
             
             # Check if ROS2 interface needs reconnection (triggered by URDF change)
             with self._reconnect_lock:
@@ -738,6 +735,14 @@ class ROS2ViserVisualizer:
                 except Exception as e:
                     logger.warning(f"Failed to update Gripper panel in update loop: {e}")
             
+            # Update Joint panel periodically (not in ROS2 callback to avoid blocking)
+            if self._joint_panel is not None and (current_time - last_joint_panel_update) >= joint_panel_update_interval:
+                try:
+                    self._joint_panel.update()
+                    last_joint_panel_update = current_time
+                except Exception as e:
+                    logger.warning(f"Failed to update Joint panel in update loop: {e}")
+            
             # Use lock to ensure URDF is not being reloaded during update
             with self._urdf_lock:
                 if self.urdf_vis is not None and self.ros2_interface is not None:
@@ -768,7 +773,23 @@ class ROS2ViserVisualizer:
                                 if not joint_positions.flags['C_CONTIGUOUS']:
                                     joint_positions = np.ascontiguousarray(joint_positions, dtype=np.float64)
                                 
-                                self.urdf_vis.update_cfg(joint_positions)
+                                # Skip update if values haven't changed (especially important for complex visual models)
+                                # This reduces unnecessary rendering for visual models which are more complex
+                                if self._last_joint_positions is not None:
+                                    if np.array_equal(joint_positions, self._last_joint_positions):
+                                        # Values unchanged, skip update to avoid unnecessary rendering
+                                        # This is especially beneficial for complex visual models
+                                        pass  # Skip update, but continue with sleep
+                                    else:
+                                        # Values changed, update visualization
+                                        self.urdf_vis.update_cfg(joint_positions)
+                                        # Cache the updated positions
+                                        self._last_joint_positions = joint_positions.copy()
+                                else:
+                                    # First update, always perform it
+                                    self.urdf_vis.update_cfg(joint_positions)
+                                    # Cache the updated positions
+                                    self._last_joint_positions = joint_positions.copy()
                             except Exception as e:
                                 logger.warning(f"Failed to update visualization: {e}")
                                 if logger.isEnabledFor(logging.DEBUG):
@@ -837,41 +858,51 @@ class ROS2ViserVisualizer:
         
         self._running = True
         
-        # Initialize ROS2 Robot Interface (this creates the node)
+        # Initialize ROS2 Robot Interface (this creates the node and starts executor thread)
         self._init_ros2_interface()
         
-        # Wait for URDF
+        # Wait for URDF by polling ros2_interface directly (avoiding circular dependency)
+        # We can't wait for _urdf_received because it's only set in _parse_urdf_string,
+        # which is called from _check_robot_description_from_interface in _update_loop,
+        # but _update_loop only starts after URDF is parsed in _init_viser_unlocked.
+        # The ros2_interface already has an executor thread running, so callbacks will be called.
         logger.info("Waiting for robot description from topic...")
         max_wait_time = 30.0  # seconds
         start_time = time.time()
         check_interval = 2.0  # Print status every 2 seconds
         
         last_status_time = start_time
-        while not self._urdf_received and (time.time() - start_time) < max_wait_time:
-            # Check with lock to ensure we see the latest value
-            with self._urdf_lock:
-                urdf_received = self._urdf_received
+        robot_description = None
+        
+        while robot_description is None and (time.time() - start_time) < max_wait_time:
+            # Poll robot_description from interface (non-blocking)
+            # The executor thread in ros2_interface is already running, so callbacks are being processed
+            if self.ros2_interface is not None and self.ros2_interface.is_connected:
+                try:
+                    robot_description = self.ros2_interface.get_robot_description()
+                    if robot_description and len(robot_description.strip()) > 0:
+                        break
+                except Exception as e:
+                    logger.debug(f"Error getting robot description: {e}")
             
-            if urdf_received:
-                break
-                
             elapsed = time.time() - start_time
             if time.time() - last_status_time >= check_interval:
                 logger.info(f"Still waiting for robot description... ({elapsed:.1f}s / {max_wait_time:.1f}s)")
                 last_status_time = time.time()
             time.sleep(0.1)
         
-        # Final check with lock
-        with self._urdf_lock:
-            urdf_received = self._urdf_received
-        
-        if not urdf_received:
+        if robot_description is None or len(robot_description.strip()) == 0:
             logger.error(f"Timeout after {max_wait_time}s waiting for robot description")
             logger.error("Please check:")
             logger.error("  1. Is /robot_description topic being published?")
             logger.error("  2. Is robot_state_publisher node running?")
             logger.error("  3. Try running: ros2 topic echo /robot_description")
             raise TimeoutError("Failed to receive robot description from ROS2 topic")
+        
+        # Parse URDF (this will set _urdf_received and start _update_loop)
+        logger.info(f"✅ Received robot description (length: {len(robot_description)} characters)")
+        urdf_hash = hashlib.md5(robot_description.encode()).hexdigest()
+        self._parse_urdf_string(robot_description, urdf_hash)
         
         logger.info("✅ Visualizer started successfully")
     

@@ -6,8 +6,6 @@ from enum import Enum
 from typing import Optional
 
 import viser
-from rclpy.subscription import Subscription
-from std_msgs.msg import Int32
 
 from ros2_robot_interface import ROS2RobotInterface
 
@@ -72,9 +70,7 @@ class GripperPanel:
         self._left_display_name: str = "Left Gripper"
         self._right_display_name: str = "Right Gripper"
         
-        # ROS2 subscriptions (keep references to prevent garbage collection)
-        self._left_target_command_subscription: Optional[Subscription] = None
-        self._right_target_command_subscription: Optional[Subscription] = None
+        # Note: No direct subscriptions - use ros2_interface.gripper_handler.is_open instead
         
         # Initialization flag
         self._initialized = False
@@ -108,9 +104,6 @@ class GripperPanel:
             
             # Initialize GUI
             self._init_gui()
-            
-            # Initialize ROS2 subscriptions for state synchronization
-            self._init_subscriptions()
             
             # Initial update to set button states
             self.update()
@@ -228,80 +221,6 @@ class GripperPanel:
             logger.error(f"Failed to initialize Gripper panel GUI: {e}", exc_info=True)
             raise
     
-    def _init_subscriptions(self):
-        """Initialize ROS2 subscriptions to target_command topics for state synchronization."""
-        if self.ros2_interface is None or not self.ros2_interface.is_connected:
-            logger.warning("ROS2RobotInterface not connected, cannot subscribe to gripper commands")
-            return
-        
-        ros2_node = self.ros2_interface.robot_node
-        if ros2_node is None:
-            logger.warning("ROS2RobotInterface node not available")
-            return
-        
-        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-        
-        qos_profile = QoSProfile(
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST
-        )
-        
-        # Subscribe to left gripper target_command if available
-        if self.ros2_interface.left_gripper_handler is not None:
-            left_controller_name = self.ros2_interface.config.left_gripper_controller_name
-            if left_controller_name:
-                left_topic = f"/{left_controller_name}/target_command"
-                self._left_target_command_subscription = ros2_node.create_subscription(
-                    Int32,
-                    left_topic,
-                    self._left_target_command_callback,
-                    qos_profile
-                )
-                logger.info(f"✅ Subscribed to {left_topic} for left gripper state tracking")
-        
-        # Subscribe to right gripper target_command if available (dual-arm mode)
-        if self.ros2_interface.right_gripper_handler is not None:
-            right_controller_name = self.ros2_interface.config.right_gripper_controller_name
-            if right_controller_name:
-                right_topic = f"/{right_controller_name}/target_command"
-                self._right_target_command_subscription = ros2_node.create_subscription(
-                    Int32,
-                    right_topic,
-                    self._right_target_command_callback,
-                    qos_profile
-                )
-                logger.info(f"✅ Subscribed to {right_topic} for right gripper state tracking")
-    
-    def _left_target_command_callback(self, msg: Int32):
-        """Callback for left gripper target_command messages to track state."""
-        # Check if panel has been cleaned up
-        if self._cleaned_up:
-            return
-        
-        try:
-            is_open = msg.data == 1
-            with self._gripper_state_lock:
-                if self._left_gripper_open != is_open:
-                    logger.debug(f"Left gripper state changed: {self._left_gripper_open} → {is_open}")
-                    self._left_gripper_open = is_open
-        except Exception as e:
-            logger.error(f"Error in left gripper target_command callback: {e}", exc_info=True)
-    
-    def _right_target_command_callback(self, msg: Int32):
-        """Callback for right gripper target_command messages to track state."""
-        # Check if panel has been cleaned up
-        if self._cleaned_up:
-            return
-        
-        try:
-            is_open = msg.data == 1
-            with self._gripper_state_lock:
-                if self._right_gripper_open != is_open:
-                    logger.debug(f"Right gripper state changed: {self._right_gripper_open} → {is_open}")
-                    self._right_gripper_open = is_open
-        except Exception as e:
-            logger.error(f"Error in right gripper target_command callback: {e}", exc_info=True)
     
     def _on_gripper_command(self, gripper_type: GripperType, should_open: bool):
         """Handle gripper button click - send open or close command.
@@ -324,10 +243,6 @@ class GripperPanel:
                 target_value = 1 if should_open else 0
                 self.ros2_interface.left_gripper_handler.send_target_command(target_value)
                 
-                # Update state immediately (don't wait for subscription callback)
-                with self._gripper_state_lock:
-                    self._left_gripper_open = should_open
-                
                 logger.info(f"Sent left gripper command: {'Open' if should_open else 'Close'}")
                 
             elif gripper_type == GripperType.RIGHT:
@@ -338,10 +253,6 @@ class GripperPanel:
                 # Send command using target_command (recommended method)
                 target_value = 1 if should_open else 0
                 self.ros2_interface.right_gripper_handler.send_target_command(target_value)
-                
-                # Update state immediately (don't wait for subscription callback)
-                with self._gripper_state_lock:
-                    self._right_gripper_open = should_open
                 
                 logger.info(f"Sent right gripper command: {'Open' if should_open else 'Close'}")
                 
@@ -436,29 +347,34 @@ class GripperPanel:
             return
         
         try:
-            # Also try to get state from gripper handlers if available
-            # (as a fallback if subscriptions haven't received messages yet)
+            # Get state from gripper handlers (they subscribe to target_command internally)
             if self.ros2_interface.left_gripper_handler is not None:
                 try:
-                    handler_is_open = self.ros2_interface.left_gripper_handler.is_open
+                    with self.ros2_interface.left_gripper_handler.data_lock:
+                        left_open = self.ros2_interface.left_gripper_handler.is_open
                     with self._gripper_state_lock:
-                        if self._left_gripper_open != handler_is_open:
-                            self._left_gripper_open = handler_is_open
+                        self._left_gripper_open = left_open
                 except Exception as e:
                     logger.debug(f"Could not get left gripper state from handler: {e}")
+                    with self._gripper_state_lock:
+                        left_open = self._left_gripper_open
+            else:
+                with self._gripper_state_lock:
+                    left_open = self._left_gripper_open
             
             if self.ros2_interface.right_gripper_handler is not None:
                 try:
-                    handler_is_open = self.ros2_interface.right_gripper_handler.is_open
+                    with self.ros2_interface.right_gripper_handler.data_lock:
+                        right_open = self.ros2_interface.right_gripper_handler.is_open
                     with self._gripper_state_lock:
-                        if self._right_gripper_open != handler_is_open:
-                            self._right_gripper_open = handler_is_open
+                        self._right_gripper_open = right_open
                 except Exception as e:
                     logger.debug(f"Could not get right gripper state from handler: {e}")
-            
-            with self._gripper_state_lock:
-                left_open = self._left_gripper_open
-                right_open = self._right_gripper_open
+                    with self._gripper_state_lock:
+                        right_open = self._right_gripper_open
+            else:
+                with self._gripper_state_lock:
+                    right_open = self._right_gripper_open
             
             # Update button visibility based on current state
             # Left gripper
@@ -578,28 +494,7 @@ class GripperPanel:
         except Exception as e:
             logger.warning(f"Error hiding Gripper panel GUI elements: {e}")
         
-        # Cleanup ROS2 subscriptions
-        # Wait a bit to let any in-flight callbacks complete
-        import time
-        time.sleep(0.1)
-        
-        if self._left_target_command_subscription is not None:
-            try:
-                # Try to destroy subscription, but don't fail if executor is using it
-                self._left_target_command_subscription.destroy()
-            except Exception as e:
-                logger.debug(f"Error destroying left target command subscription (may be in use by executor): {e}")
-            finally:
-                self._left_target_command_subscription = None
-        
-        if self._right_target_command_subscription is not None:
-            try:
-                # Try to destroy subscription, but don't fail if executor is using it
-                self._right_target_command_subscription.destroy()
-            except Exception as e:
-                logger.debug(f"Error destroying right target command subscription (may be in use by executor): {e}")
-            finally:
-                self._right_target_command_subscription = None
+        # Note: No direct subscriptions to cleanup - ros2_interface handles it
         
         # Clear references
         self._left_gripper_open_button = None
