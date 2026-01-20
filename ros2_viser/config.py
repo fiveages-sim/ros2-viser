@@ -27,7 +27,7 @@ class ROS2ViserConfig:
     root_node_name: str = "/robot"
     """Root node name in Viser scene."""
     
-    update_rate: float = 30.0
+    update_rate: float = 30
     """Update rate in Hz."""
     
     auto_connect: bool = True
@@ -41,3 +41,6 @@ class ROS2ViserConfig:
     
     enable_gripper_panel: bool = True
     """Whether to enable Gripper control panel. Default: True"""
+    
+    language: str = "zh"
+    """Language for GUI labels. Options: "zh" (Chinese) or "en" (English). Default: "zh" """

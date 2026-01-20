@@ -4,6 +4,7 @@ import hashlib
 import logging
 import threading
 import time
+import warnings
 from io import StringIO
 from typing import Optional
 
@@ -19,6 +20,7 @@ from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
 from .config import ROS2ViserConfig
 from .panels import FSMPanel, GripperPanel
+from .i18n import Translator, get_translator, set_global_language
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,10 @@ class ROS2ViserVisualizer:
             config: Configuration for the visualizer.
         """
         self.config = config
+        
+        # Initialize translator with config language
+        set_global_language(config.language)
+        self.translator = get_translator()
         self.server: Optional[viser.ViserServer] = None
         self.urdf_vis: Optional[ViserUrdf] = None
         self.urdf: Optional[yourdfpy.URDF] = None
@@ -82,9 +88,20 @@ class ROS2ViserVisualizer:
         self.joint_name_to_index: dict[str, int] = {}
         self.urdf_joint_names: list[str] = []
         
+        # Precomputed mapping for performance optimization
+        self._joint_name_to_urdf_index: dict[str, int] = {}  # Maps joint name to URDF index (computed once)
+        
         # GUI panels
         self._fsm_panel: Optional[FSMPanel] = None
         self._gripper_panel: Optional[GripperPanel] = None
+        
+        # Display control panel
+        self._display_folder_handle: Optional[viser.GuiFolderHandle] = None
+        self._show_visual_checkbox: Optional[viser.GuiCheckboxHandle] = None
+        self._show_collision_checkbox: Optional[viser.GuiCheckboxHandle] = None
+        self._language_dropdown: Optional[viser.GuiDropdownHandle] = None
+        self._show_visual: bool = True
+        self._show_collision: bool = False
         
         # Keep references to subscriptions to prevent garbage collection
         self._robot_description_subscription: Optional[Subscription] = None
@@ -175,20 +192,32 @@ class ROS2ViserVisualizer:
                 # Parse URDF from string using StringIO
                 logger.debug(f"Parsing URDF (length: {len(urdf_string)} characters)")
                 # yourdfpy.URDF.load() can load from a file-like object
-                # Load with visual scene enabled (needed for ViserUrdf visualization)
+                # Load with visual scene and collision scene enabled (needed for ViserUrdf visualization)
                 urdf_io = StringIO(urdf_string)
                 try:
-                    # Try to load with explicit parameters to enable visual scene
-                    # build_scene_graph=True enables visual scene (default in newer versions)
-                    self.urdf = yourdfpy.URDF.load(urdf_io, build_scene_graph=True)
-                    logger.debug("URDF loaded with build_scene_graph=True")
+                    # Try to load with explicit parameters to enable visual and collision scenes
+                    # build_scene_graph=True enables visual scene
+                    # load_collision_meshes=True and build_collision_scene_graph=True enable collision scene
+                    self.urdf = yourdfpy.URDF.load(
+                        urdf_io,
+                        build_scene_graph=True,
+                        load_collision_meshes=True,
+                        build_collision_scene_graph=True
+                    )
+                    logger.debug("URDF loaded with build_scene_graph=True, load_collision_meshes=True, build_collision_scene_graph=True")
                 except (AttributeError, TypeError) as e:
-                    # Fallback: try without build_scene_graph parameter (older versions)
-                    if "build_scene_graph" in str(e) or "unexpected keyword" in str(e):
+                    # Fallback: try with fewer parameters (older versions)
+                    if "build_scene_graph" in str(e) or "unexpected keyword" in str(e) or "load_collision_meshes" in str(e):
                         urdf_io.seek(0)  # Reset StringIO
-                        # Older versions: load normally (should enable visual scene by default)
-                        self.urdf = yourdfpy.URDF.load(urdf_io)
-                        logger.debug("URDF loaded with default settings (visual scene should be enabled)")
+                        try:
+                            # Try with just build_scene_graph
+                            self.urdf = yourdfpy.URDF.load(urdf_io, build_scene_graph=True)
+                            logger.debug("URDF loaded with build_scene_graph=True (collision meshes may not be loaded)")
+                        except (AttributeError, TypeError):
+                            # Final fallback: load normally
+                            urdf_io.seek(0)
+                            self.urdf = yourdfpy.URDF.load(urdf_io)
+                            logger.debug("URDF loaded with default settings (visual scene should be enabled, collision may not be loaded)")
                     else:
                         raise
                 
@@ -236,6 +265,9 @@ class ROS2ViserVisualizer:
                            f"({len(self.urdf_actuated_joint_names)} actuated, "
                            f"{len(self.mimic_joint_info)} mimic, "
                            f"{len(self.urdf_all_joint_names) - len(self.urdf_actuated_joint_names) - len(self.mimic_joint_info)} fixed)")
+                
+                # Precompute mapping from joint name to URDF index (only computed once)
+                self._joint_name_to_urdf_index = {name: i for i, name in enumerate(self.urdf_all_joint_names)}
                 
                 # Initialize Viser visualization
                 # Note: We're already inside _urdf_lock, so call the unlocked version
@@ -345,10 +377,220 @@ class ROS2ViserVisualizer:
         except Exception as e:
             logger.error(f"Failed to reinitialize panels: {e}", exc_info=True)
     
+    def _reinitialize_panels_with_language(self):
+        """Update panel GUI labels with new language without destroying subscriptions.
+        
+        This method only updates GUI labels, preserving all ROS2 subscriptions
+        and state. This is much safer than recreating everything.
+        """
+        try:
+            # Update display control panel
+            if self._display_folder_handle is not None:
+                try:
+                    self._display_folder_handle.remove()
+                except Exception as e:
+                    logger.warning(f"Error removing display control panel during language change: {e}")
+                self._display_folder_handle = None
+                self._show_visual_checkbox = None
+                self._show_collision_checkbox = None
+                self._language_dropdown = None
+            
+            # Reinitialize display control panel with new language
+            self._init_display_control_panel()
+            
+            # Update panel GUI labels (preserving subscriptions and state)
+            if self.config.enable_fsm_panel and self._fsm_panel is not None:
+                try:
+                    self._fsm_panel.update_gui_labels()
+                    logger.info("✅ FSM panel labels updated with new language")
+                except Exception as e:
+                    logger.warning(f"Failed to update FSM panel labels: {e}")
+            
+            if self.config.enable_gripper_panel and self._gripper_panel is not None:
+                try:
+                    self._gripper_panel.update_gui_labels()
+                    logger.info("✅ Gripper panel labels updated with new language")
+                except Exception as e:
+                    logger.warning(f"Failed to update Gripper panel labels: {e}")
+                
+        except Exception as e:
+            logger.error(f"Failed to update panels with new language: {e}", exc_info=True)
+    
     def _init_viser(self):
         """Initialize Viser server and URDF visualization (with lock)."""
         with self._urdf_lock:
             self._init_viser_unlocked()
+    
+    def _init_display_control_panel(self):
+        """Initialize display control panel with checkboxes for visual and collision."""
+        if self.server is None:
+            return
+        
+        try:
+            # Create folder for display controls
+            self._display_folder_handle = self.server.gui.add_folder(self.translator("display_control"))
+            with self._display_folder_handle:
+                # Language selection dropdown
+                self._language_dropdown = self.server.gui.add_dropdown(
+                    self.translator("select_language"),
+                    options=["中文", "English"],
+                    initial_value="中文" if self.translator.language == "zh" else "English"
+                )
+                self._language_dropdown.on_update(
+                    lambda _: self._on_language_changed(self._language_dropdown.value)
+                )
+                
+                # Checkbox for showing visual
+                self._show_visual_checkbox = self.server.gui.add_checkbox(
+                    self.translator("show_visual"),
+                    initial_value=self._show_visual
+                )
+                self._show_visual_checkbox.on_update(
+                    lambda _: self._on_show_visual_changed(self._show_visual_checkbox.value)
+                )
+                
+                # Checkbox for showing collision
+                self._show_collision_checkbox = self.server.gui.add_checkbox(
+                    self.translator("show_collision"),
+                    initial_value=self._show_collision
+                )
+                self._show_collision_checkbox.on_update(
+                    lambda _: self._on_show_collision_changed(self._show_collision_checkbox.value)
+                )
+            
+            logger.debug("Display control panel initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize display control panel: {e}", exc_info=True)
+    
+    def _on_show_visual_changed(self, value: bool):
+        """Callback when show visual checkbox is toggled."""
+        self._show_visual = value
+        self._update_urdf_display()
+        logger.debug(f"Show visual changed to: {value}")
+    
+    def _on_show_collision_changed(self, value: bool):
+        """Callback when show collision checkbox is toggled."""
+        self._show_collision = value
+        self._update_urdf_display()
+        logger.debug(f"Show collision changed to: {value}")
+    
+    def _on_language_changed(self, language_display: str):
+        """Callback when language dropdown is changed.
+        
+        Args:
+            language_display: Display name of selected language ("中文" or "English").
+        """
+        # Map display name to language code
+        language_map = {
+            "中文": "zh",
+            "English": "en"
+        }
+        
+        new_language = language_map.get(language_display, "zh")
+        if new_language == self.translator.language:
+            # Language hasn't changed, skip
+            return
+        
+        logger.info(f"Language changed to: {new_language}")
+        
+        # Update global language
+        set_global_language(new_language)
+        
+        # Update config to persist language setting
+        self.config.language = new_language
+        
+        # Reinitialize all panels to update labels
+        # Note: This will recreate GUI elements with new language
+        self._reinitialize_panels_with_language()
+    
+    def _update_urdf_display(self):
+        """Update URDF visualization based on display settings."""
+        if self.urdf_vis is None or self.server is None:
+            return
+        
+        try:
+            # Method 1: Try to access ViserUrdf's internal attributes to control display
+            # ViserUrdf has show_visual and show_collision attributes
+            # Suppress warnings when setting show_collision if no collision meshes exist
+            if hasattr(self.urdf_vis, 'show_visual'):
+                try:
+                    self.urdf_vis.show_visual = self._show_visual
+                    logger.debug(f"Set ViserUrdf.show_visual = {self._show_visual}")
+                except Exception as e:
+                    logger.debug(f"Could not set show_visual: {e}")
+            
+            if hasattr(self.urdf_vis, 'show_collision'):
+                # Suppress the warning about no collision meshes - this is expected
+                # if the URDF doesn't have collision geometry defined
+                with warnings.catch_warnings():
+                    # Filter out warnings about collision meshes not being loaded
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=".*Cannot set.*show_collision.*",
+                        category=UserWarning
+                    )
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=".*no collision meshes.*",
+                        category=UserWarning
+                    )
+                    try:
+                        self.urdf_vis.show_collision = self._show_collision
+                        logger.debug(f"Set ViserUrdf.show_collision = {self._show_collision}")
+                    except Exception as e:
+                        logger.debug(f"Could not set show_collision: {e}")
+            
+            # Method 2: Try to access scene nodes and set visibility
+            # ViserUrdf creates scene nodes for visual and collision geometries
+            if hasattr(self.urdf_vis, 'scene_nodes'):
+                # If ViserUrdf has a scene_nodes attribute, update visibility
+                for node_name, node in self.urdf_vis.scene_nodes.items():
+                    if 'visual' in node_name.lower():
+                        # Set visual node visibility
+                        if hasattr(node, 'visible'):
+                            node.visible = self._show_visual
+                    elif 'collision' in node_name.lower():
+                        # Set collision node visibility
+                        if hasattr(node, 'visible'):
+                            node.visible = self._show_collision
+            
+            # Method 3: Access the server's scene and update node visibility directly
+            # Traverse scene nodes under the root node to find visual/collision meshes
+            root_path = self.config.root_node_name
+            try:
+                # Get all nodes in the scene that start with the root path
+                # ViserUrdf typically creates nodes like /robot/link_name/visual or /robot/link_name/collision
+                # We need to iterate through all scene nodes and update their visibility
+                
+                # Try to access scene's internal node structure
+                if hasattr(self.server.scene, '_nodes') or hasattr(self.server.scene, 'nodes'):
+                    nodes_dict = getattr(self.server.scene, '_nodes', None) or getattr(self.server.scene, 'nodes', None)
+                    if nodes_dict:
+                        for node_path, node_obj in nodes_dict.items():
+                            if node_path.startswith(root_path):
+                                # Check if this is a visual or collision node
+                                path_lower = node_path.lower()
+                                if '/visual' in path_lower or path_lower.endswith('/visual'):
+                                    # This is a visual node
+                                    if hasattr(node_obj, 'visible'):
+                                        node_obj.visible = self._show_visual
+                                    elif hasattr(node_obj, 'set_visible'):
+                                        node_obj.set_visible(self._show_visual)
+                                elif '/collision' in path_lower or path_lower.endswith('/collision'):
+                                    # This is a collision node
+                                    if hasattr(node_obj, 'visible'):
+                                        node_obj.visible = self._show_collision
+                                    elif hasattr(node_obj, 'set_visible'):
+                                        node_obj.set_visible(self._show_collision)
+                
+                logger.debug(f"Updated display: visual={self._show_visual}, collision={self._show_collision}")
+            except Exception as e:
+                logger.debug(f"Could not update scene node visibility directly: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Failed to update URDF display: {e}")
+            # Log the error but don't raise - the visualization will still work
+            # even if we can't control visual/collision separately
     
     def _init_viser_unlocked(self):
         """Initialize Viser server and URDF visualization (without lock, assumes lock is already held)."""
@@ -368,6 +610,9 @@ class ROS2ViserVisualizer:
                 # Add ground grid (only once)
                 logger.debug("Adding ground grid...")
                 self.server.scene.add_grid("/ground", width=2, height=2)
+                
+                # Initialize display control panel
+                self._init_display_control_panel()
                 
                 # Create panels if they don't exist yet
                 # (They will be reinitialized if URDF changes)
@@ -389,12 +634,33 @@ class ROS2ViserVisualizer:
             # Create URDF visualization
             logger.debug(f"Creating ViserUrdf with {len(self.urdf_all_joint_names)} joints...")
             try:
+                # Check if collision scene is available in URDF
+                has_collision_scene = (
+                    hasattr(self.urdf, 'collision_scene') and 
+                    self.urdf.collision_scene is not None
+                )
+                
+                # Create ViserUrdf with collision meshes enabled
+                # According to Viser documentation, we need to pass load_collision_meshes=True
                 self.urdf_vis = ViserUrdf(
                     self.server,
                     self.urdf,
-                    root_node_name=self.config.root_node_name
+                    root_node_name=self.config.root_node_name,
+                    load_meshes=True,  # Load visual meshes
+                    load_collision_meshes=has_collision_scene,  # Load collision meshes if available
                 )
                 logger.info(f"✅ URDF visualization initialized at {self.config.root_node_name}")
+                if has_collision_scene:
+                    logger.info(f"✅ {self.translator('collision_meshes_loaded')}")
+                else:
+                    logger.info(f"ℹ️  {self.translator('no_collision_meshes')}")
+                
+                # Update checkbox visibility based on what's actually loaded
+                if self._show_collision_checkbox is not None:
+                    self._show_collision_checkbox.visible = has_collision_scene
+                
+                # Apply initial display settings
+                self._update_urdf_display()
             except Exception as e:
                 logger.error(f"Failed to create ViserUrdf: {e}", exc_info=True)
                 raise
@@ -496,20 +762,13 @@ class ROS2ViserVisualizer:
                         
                         if joint_positions is not None:
                             # Update visualization
+                            # _map_joint_states already returns a properly formatted numpy array
                             try:
-                                # Ensure joint_positions is a proper numpy array with correct dtype
-                                # Convert to numpy array and ensure all elements are numpy scalars
-                                joint_positions_array = np.array(joint_positions, dtype=np.float64, copy=True)
+                                # Ensure array is contiguous (for performance)
+                                if not joint_positions.flags['C_CONTIGUOUS']:
+                                    joint_positions = np.ascontiguousarray(joint_positions, dtype=np.float64)
                                 
-                                # Ensure array is 1D and contiguous
-                                if joint_positions_array.ndim != 1:
-                                    joint_positions_array = joint_positions_array.flatten()
-                                
-                                # Double-check: ensure all elements are numpy float64 scalars
-                                # This is critical - ViserUrdf.update_cfg() may call .item() on elements
-                                joint_positions_array = np.array([np.float64(x) for x in joint_positions_array], dtype=np.float64)
-                                
-                                self.urdf_vis.update_cfg(joint_positions_array)
+                                self.urdf_vis.update_cfg(joint_positions)
                             except Exception as e:
                                 logger.warning(f"Failed to update visualization: {e}")
                                 if logger.isEnabledFor(logging.DEBUG):
@@ -539,9 +798,11 @@ class ROS2ViserVisualizer:
     def _map_joint_states(self, joint_names: list[str], positions: list[float]) -> Optional[np.ndarray]:
         """Map joint states from ROS2 topic to URDF joint order (ALL joints).
         
+        Optimized version that minimizes dictionary lookups and type conversions.
+        
         This function handles:
         - Actuated joints: get value from joint state
-        - Mimic joints: compute from mimicked joint using multiplier and offset (recursively)
+        - Mimic joints: compute from mimicked joint using multiplier and offset
         - Fixed joints: use 0.0
         
         Args:
@@ -554,55 +815,17 @@ class ROS2ViserVisualizer:
         if not self.urdf_all_joint_names:
             return None
         
-        # Create mapping from ROS2 joint state (convert to numpy float64)
-        joint_dict = {}
-        for name, pos in zip(joint_names, positions):
-            # Ensure positions are numpy float64
-            joint_dict[name] = np.float64(pos)
+        num_joints = len(self.urdf_all_joint_names)
         
-        # First pass: collect actuated joint values
-        actuated_values = {}
-        for joint_name in self.urdf_actuated_joint_names:
-            if joint_name in joint_dict:
-                actuated_values[joint_name] = joint_dict[joint_name]
-            else:
-                # Joint not found, use 0.0 as default
-                logger.debug(f"Actuated joint {joint_name} not found in joint state, using 0.0")
-                actuated_values[joint_name] = np.float64(0.0)
+        # Pre-allocate result array with zeros (default for all joints)
+        result = np.zeros(num_joints, dtype=np.float64)
         
-        # Second pass: compute all joint values (actuated, mimic, fixed)
-        all_joint_values = {}
-        for joint_name in self.urdf_all_joint_names:
-            if joint_name in self.mimic_joint_info:
-                # Mimic joint: compute from directly mimicked joint
-                mimicked_joint, multiplier, offset = self.mimic_joint_info[joint_name]
-                
-                if mimicked_joint in actuated_values:
-                    # Compute value from mimicked actuated joint
-                    # Ensure all operations use numpy types
-                    base_value = np.float64(actuated_values[mimicked_joint])
-                    mult = np.float64(multiplier)
-                    off = np.float64(offset)
-                    value = base_value * mult + off
-                    all_joint_values[joint_name] = np.float64(value)
-                else:
-                    logger.debug(f"Mimic joint {joint_name} references non-actuated joint {mimicked_joint}, using 0.0")
-                    all_joint_values[joint_name] = np.float64(0.0)
-            elif joint_name in actuated_values:
-                # Actuated joint: use value from joint state
-                all_joint_values[joint_name] = actuated_values[joint_name]
-            else:
-                # Fixed joint or unknown: use 0.0
-                all_joint_values[joint_name] = np.float64(0.0)
-        
-        # Map to URDF joint order (ALL joints)
-        # Create list and convert to numpy array in one step
-        # This ensures all values are properly converted to numpy float64
-        mapped_positions = [np.float64(all_joint_values[joint_name]) for joint_name in self.urdf_all_joint_names]
-        
-        # Convert to numpy array - this should preserve numpy float64 types
-        # Use np.fromiter for better type preservation, or np.array with explicit dtype
-        result = np.fromiter(mapped_positions, dtype=np.float64, count=len(mapped_positions))
+        # Use precomputed mapping (computed once during URDF parsing)
+        for joint_name, position in zip(joint_names, positions):
+            if joint_name in self._joint_name_to_urdf_index:
+                # Joint exists in URDF, set its value directly
+                urdf_index = self._joint_name_to_urdf_index[joint_name]
+                result[urdf_index] = position
         
         return result
     
@@ -656,18 +879,8 @@ class ROS2ViserVisualizer:
         """Stop the visualizer and cleanup resources."""
         self._running = False
         
-        # Wait for update thread
-        if self._update_thread is not None:
-            self._update_thread.join(timeout=2.0)
-        
-        # Cleanup ROS2 Robot Interface
-        if self.ros2_interface is not None and self._own_interface:
-            try:
-                self.ros2_interface.disconnect()
-            except Exception as e:
-                logger.warning(f"Error disconnecting ROS2 interface: {e}")
-        
-        # Cleanup panels
+        # First, cleanup panels to set cleanup flags and prevent callbacks
+        # This should be done before disconnecting ROS2 interface
         if self._fsm_panel is not None:
             try:
                 self._fsm_panel.cleanup()
@@ -679,6 +892,31 @@ class ROS2ViserVisualizer:
                 self._gripper_panel.cleanup()
             except Exception as e:
                 logger.warning(f"Error cleaning up Gripper panel: {e}")
+        
+        # Wait for update thread first (it uses ros2_interface)
+        if self._update_thread is not None:
+            self._update_thread.join(timeout=2.0)
+        
+        # Wait a bit to let any in-flight ROS2 callbacks complete
+        # This gives executor time to finish current operations
+        time.sleep(0.2)
+        
+        # Cleanup ROS2 Robot Interface (this will shutdown executor)
+        # Do this after panels are cleaned up and update thread is stopped
+        if self.ros2_interface is not None and self._own_interface:
+            try:
+                self.ros2_interface.disconnect()
+            except Exception as e:
+                # This error can occur if executor is still running when disconnect is called
+                # It's safe to ignore as the disconnect will still complete
+                logger.debug(f"Error during ROS2 interface disconnect (may be expected during shutdown): {e}")
+        
+        # Cleanup display control panel
+        if self._display_folder_handle is not None:
+            try:
+                self._display_folder_handle.remove()
+            except Exception as e:
+                logger.warning(f"Error removing display control panel: {e}")
         
         # Cleanup Viser
         if self.urdf_vis is not None:

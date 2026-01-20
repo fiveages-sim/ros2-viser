@@ -11,6 +11,8 @@ from std_msgs.msg import Int32
 
 from ros2_robot_interface import ROS2RobotInterface
 
+from ..i18n import get_translator
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +51,7 @@ class GripperPanel:
         """
         self.server = server
         self.ros2_interface = ros2_interface
+        self.translator = get_translator()
         
         # Gripper state tracking
         self._left_gripper_open: bool = False
@@ -75,6 +78,9 @@ class GripperPanel:
         
         # Initialization flag
         self._initialized = False
+        
+        # Cleanup flag to prevent callbacks from running after cleanup
+        self._cleaned_up = False
     
     def initialize(self):
         """Initialize the Gripper panel GUI and ROS2 subscriptions."""
@@ -96,6 +102,9 @@ class GripperPanel:
                 logger.info("No gripper controllers detected, skipping Gripper panel initialization")
                 self._initialized = False
                 return
+            
+            # Reset cleanup flag
+            self._cleaned_up = False
             
             # Initialize GUI
             self._init_gui()
@@ -178,24 +187,38 @@ class GripperPanel:
                 self._right_display_name = self._get_display_name(right_controller_name)
             
             # Create folder and save reference for cleanup
-            self._folder_handle = self.server.gui.add_folder("EE Control")
+            self._folder_handle = self.server.gui.add_folder(self.translator("ee_control"))
             with self._folder_handle:
                 # Left gripper buttons (Open and Close)
                 # Open button - Green
-                self._left_gripper_open_button = self.server.gui.add_button(f"Open {self._left_display_name}", color="green")
+                open_text = self.translator("open")
+                close_text = self.translator("close")
+                self._left_gripper_open_button = self.server.gui.add_button(
+                    f"{open_text} {self._left_display_name}", 
+                    color="green"
+                )
                 self._left_gripper_open_button.on_click(lambda _: self._on_gripper_command(GripperType.LEFT, True))
                 
                 # Close button - Red
-                self._left_gripper_close_button = self.server.gui.add_button(f"Close {self._left_display_name}", color="red")
+                self._left_gripper_close_button = self.server.gui.add_button(
+                    f"{close_text} {self._left_display_name}", 
+                    color="red"
+                )
                 self._left_gripper_close_button.on_click(lambda _: self._on_gripper_command(GripperType.LEFT, False))
                 
                 # Right gripper buttons (for dual-arm mode)
                 # Open button - Green
-                self._right_gripper_open_button = self.server.gui.add_button(f"Open {self._right_display_name}", color="green")
+                self._right_gripper_open_button = self.server.gui.add_button(
+                    f"{open_text} {self._right_display_name}", 
+                    color="green"
+                )
                 self._right_gripper_open_button.on_click(lambda _: self._on_gripper_command(GripperType.RIGHT, True))
                 
                 # Close button - Red
-                self._right_gripper_close_button = self.server.gui.add_button(f"Close {self._right_display_name}", color="red")
+                self._right_gripper_close_button = self.server.gui.add_button(
+                    f"{close_text} {self._right_display_name}", 
+                    color="red"
+                )
                 self._right_gripper_close_button.on_click(lambda _: self._on_gripper_command(GripperType.RIGHT, False))
                 
                 # Update button visibility based on detected mode
@@ -252,6 +275,10 @@ class GripperPanel:
     
     def _left_target_command_callback(self, msg: Int32):
         """Callback for left gripper target_command messages to track state."""
+        # Check if panel has been cleaned up
+        if self._cleaned_up:
+            return
+        
         try:
             is_open = msg.data == 1
             with self._gripper_state_lock:
@@ -263,6 +290,10 @@ class GripperPanel:
     
     def _right_target_command_callback(self, msg: Int32):
         """Callback for right gripper target_command messages to track state."""
+        # Check if panel has been cleaned up
+        if self._cleaned_up:
+            return
+        
         try:
             is_open = msg.data == 1
             with self._gripper_state_lock:
@@ -448,8 +479,83 @@ class GripperPanel:
         except Exception as e:
             logger.warning(f"Failed to update Gripper panel: {e}")
     
+    def update_gui_labels(self):
+        """Update GUI labels with current language without recreating subscriptions.
+        
+        This method only updates the text/labels of GUI elements, preserving
+        all ROS2 subscriptions and state.
+        """
+        if not self._initialized or self.server is None:
+            return
+        
+        try:
+            # Update folder name and button labels
+            if self._folder_handle is not None:
+                # Viser folders don't support renaming, so we need to recreate the folder
+                # But we'll keep the subscriptions intact
+                old_folder = self._folder_handle
+                
+                # Create new folder with new language
+                self._folder_handle = self.server.gui.add_folder(self.translator("ee_control"))
+                
+                # Move all GUI elements to new folder (recreate them)
+                with self._folder_handle:
+                    open_text = self.translator("open")
+                    close_text = self.translator("close")
+                    
+                    # Recreate left gripper buttons
+                    self._left_gripper_open_button = self.server.gui.add_button(
+                        f"{open_text} {self._left_display_name}",
+                        color="green"
+                    )
+                    self._left_gripper_open_button.on_click(
+                        lambda _: self._on_gripper_command(GripperType.LEFT, True)
+                    )
+                    
+                    self._left_gripper_close_button = self.server.gui.add_button(
+                        f"{close_text} {self._left_display_name}",
+                        color="red"
+                    )
+                    self._left_gripper_close_button.on_click(
+                        lambda _: self._on_gripper_command(GripperType.LEFT, False)
+                    )
+                    
+                    # Recreate right gripper buttons (if dual-arm)
+                    if self._is_dual_arm:
+                        self._right_gripper_open_button = self.server.gui.add_button(
+                            f"{open_text} {self._right_display_name}",
+                            color="green"
+                        )
+                        self._right_gripper_open_button.on_click(
+                            lambda _: self._on_gripper_command(GripperType.RIGHT, True)
+                        )
+                        
+                        self._right_gripper_close_button = self.server.gui.add_button(
+                            f"{close_text} {self._right_display_name}",
+                            color="red"
+                        )
+                        self._right_gripper_close_button.on_click(
+                            lambda _: self._on_gripper_command(GripperType.RIGHT, False)
+                        )
+                
+                # Remove old folder
+                try:
+                    old_folder.remove()
+                except Exception as e:
+                    logger.debug(f"Could not remove old folder: {e}")
+                
+                # Update UI to reflect current state
+                self.update()
+                
+                logger.debug("Gripper panel GUI labels updated")
+        except Exception as e:
+            logger.warning(f"Failed to update Gripper panel GUI labels: {e}")
+    
     def cleanup(self):
         """Cleanup resources (subscriptions, GUI elements, etc.)."""
+        # Set cleanup flag first to prevent callbacks from running
+        self._cleaned_up = True
+        
         # Hide all GUI elements
         try:
             if self._left_gripper_open_button is not None:
@@ -473,19 +579,27 @@ class GripperPanel:
             logger.warning(f"Error hiding Gripper panel GUI elements: {e}")
         
         # Cleanup ROS2 subscriptions
+        # Wait a bit to let any in-flight callbacks complete
+        import time
+        time.sleep(0.1)
+        
         if self._left_target_command_subscription is not None:
             try:
+                # Try to destroy subscription, but don't fail if executor is using it
                 self._left_target_command_subscription.destroy()
             except Exception as e:
-                logger.warning(f"Error destroying left target command subscription: {e}")
-            self._left_target_command_subscription = None
+                logger.debug(f"Error destroying left target command subscription (may be in use by executor): {e}")
+            finally:
+                self._left_target_command_subscription = None
         
         if self._right_target_command_subscription is not None:
             try:
+                # Try to destroy subscription, but don't fail if executor is using it
                 self._right_target_command_subscription.destroy()
             except Exception as e:
-                logger.warning(f"Error destroying right target command subscription: {e}")
-            self._right_target_command_subscription = None
+                logger.debug(f"Error destroying right target command subscription (may be in use by executor): {e}")
+            finally:
+                self._right_target_command_subscription = None
         
         # Clear references
         self._left_gripper_open_button = None

@@ -11,6 +11,8 @@ from std_msgs.msg import Int32
 
 from ros2_robot_interface import ROS2RobotInterface
 
+from ..i18n import get_translator
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +48,7 @@ class FSMPanel:
         self.server = server
         self.ros2_interface = ros2_interface
         self.fsm_command_topic = fsm_command_topic
+        self.translator = get_translator()
         
         # FSM state tracking
         self._current_fsm_state: str = "HOLD"
@@ -63,6 +66,9 @@ class FSMPanel:
         
         # Initialization flag
         self._initialized = False
+        
+        # Cleanup flag to prevent callbacks from running after cleanup
+        self._cleaned_up = False
     
     def initialize(self):
         """Initialize the FSM panel GUI and ROS2 subscriptions."""
@@ -72,6 +78,9 @@ class FSMPanel:
             self.cleanup()
         
         try:
+            # Reset cleanup flag
+            self._cleaned_up = False
+            
             # Initialize ROS2 subscription first
             self._init_fsm_subscription()
             
@@ -127,6 +136,10 @@ class FSMPanel:
         call GUI operations directly here as they may block or cause deadlocks.
         Instead, we only update the state, and GUI updates happen in the update() method.
         """
+        # Check if panel has been cleaned up
+        if self._cleaned_up:
+            return
+        
         try:
             command = msg.data
             
@@ -160,11 +173,11 @@ class FSMPanel:
         
         try:
             # Create folder and save reference for cleanup
-            self._folder_handle = self.server.gui.add_folder("FSM Control")
+            self._folder_handle = self.server.gui.add_folder(self.translator("fsm_control"))
             with self._folder_handle:
                 # Current state display (read-only)
                 self._fsm_state_label = self.server.gui.add_text(
-                    "Current State",
+                    self.translator("current_state"),
                     initial_value="HOLD",
                     disabled=True
                 )
@@ -197,7 +210,11 @@ class FSMPanel:
                 # Special action: Switch pose (only available in HOME state)
                 # This sends command 100, then automatically sends 0 after 0.1s
                 # Deep orange/red-orange for special action to distinguish from yellow
-                self._fsm_switch_pose_button = self.server.gui.add_button("切换姿态 (Home ↔ Rest)", color=(255, 100, 0))
+                switch_pose_text = self.translator("switch_pose")
+                self._fsm_switch_pose_button = self.server.gui.add_button(
+                    f"{switch_pose_text} (Home ↔ Rest)", 
+                    color=(255, 100, 0)
+                )
                 self._fsm_switch_pose_button.on_click(self._on_switch_pose_clicked)
                 
         except Exception as e:
@@ -312,8 +329,81 @@ class FSMPanel:
         except Exception as e:
             logger.warning(f"Failed to update FSM panel: {e}")
     
+    def update_gui_labels(self):
+        """Update GUI labels with current language without recreating subscriptions.
+        
+        This method only updates the text/labels of GUI elements, preserving
+        all ROS2 subscriptions and state.
+        """
+        if not self._initialized or self.server is None:
+            return
+        
+        try:
+            # Update folder name
+            if self._folder_handle is not None:
+                # Viser folders don't support renaming, so we need to recreate the folder
+                # But we'll keep the subscriptions intact
+                old_folder = self._folder_handle
+                
+                # Create new folder with new language
+                self._folder_handle = self.server.gui.add_folder(self.translator("fsm_control"))
+                
+                # Move all GUI elements to new folder (recreate them)
+                with self._folder_handle:
+                    # Recreate state label
+                    self._fsm_state_label = self.server.gui.add_text(
+                        self.translator("current_state"),
+                        initial_value=self._current_fsm_state,
+                        disabled=True
+                    )
+                    
+                    # Recreate buttons
+                    self._fsm_button_handles["to_home"] = self.server.gui.add_button("HOME", color=(128, 0, 128))
+                    self._fsm_button_handles["to_home"].on_click(
+                        lambda _: self._send_fsm_command(1, "HOME")
+                    )
+                    
+                    self._fsm_button_handles["to_hold"] = self.server.gui.add_button("HOLD", color="yellow")
+                    self._fsm_button_handles["to_hold"].on_click(
+                        lambda _: self._send_fsm_command(2, "HOLD")
+                    )
+                    
+                    self._fsm_button_handles["to_ocs2"] = self.server.gui.add_button("OCS2", color="blue")
+                    self._fsm_button_handles["to_ocs2"].on_click(
+                        lambda _: self._send_fsm_command(3, "OCS2")
+                    )
+                    
+                    self._fsm_button_handles["to_movej"] = self.server.gui.add_button("MOVEJ", color="cyan")
+                    self._fsm_button_handles["to_movej"].on_click(
+                        lambda _: self._send_fsm_command(4, "MOVEJ")
+                    )
+                    
+                    # Recreate switch pose button
+                    switch_pose_text = self.translator("switch_pose")
+                    self._fsm_switch_pose_button = self.server.gui.add_button(
+                        f"{switch_pose_text} (Home ↔ Rest)",
+                        color=(255, 100, 0)
+                    )
+                    self._fsm_switch_pose_button.on_click(self._on_switch_pose_clicked)
+                
+                # Remove old folder
+                try:
+                    old_folder.remove()
+                except Exception as e:
+                    logger.debug(f"Could not remove old folder: {e}")
+                
+                # Update UI to reflect current state
+                self.update()
+                
+                logger.debug("FSM panel GUI labels updated")
+        except Exception as e:
+            logger.warning(f"Failed to update FSM panel GUI labels: {e}")
+    
     def cleanup(self):
         """Cleanup resources (subscriptions, GUI elements, etc.)."""
+        # Set cleanup flag first to prevent callbacks from running
+        self._cleaned_up = True
+        
         # Hide all GUI elements
         try:
             if self._fsm_state_label is not None:
@@ -336,11 +426,12 @@ class FSMPanel:
             logger.warning(f"Error hiding FSM panel GUI elements: {e}")
         
         # Cleanup ROS2 subscription
+        # Don't destroy subscription immediately - executor may still be using it
+        # Just clear the reference and let it be garbage collected when executor is done
+        # The _cleaned_up flag will prevent callbacks from doing anything
         if self._fsm_command_subscription is not None:
-            try:
-                self._fsm_command_subscription.destroy()
-            except Exception as e:
-                logger.warning(f"Error destroying FSM command subscription: {e}")
+            # Don't destroy here - let ROS2 handle cleanup when node is destroyed
+            # Just clear the reference so we don't try to use it
             self._fsm_command_subscription = None
         
         # Clear references
