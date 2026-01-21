@@ -16,7 +16,7 @@ import yourdfpy
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 
 from .config import ROS2ViserConfig
-from .panels import FSMPanel, GripperPanel, JointPanel
+from .panels import FSMPanel, GripperPanel, JointPanel, HardwarePanel
 from .i18n import Translator, get_translator, set_global_language
 from .end_effector_marker import EndEffectorMarkerManager
 
@@ -94,6 +94,7 @@ class ROS2ViserVisualizer:
         self._fsm_panel: Optional[FSMPanel] = None
         self._gripper_panel: Optional[GripperPanel] = None
         self._joint_panel: Optional[JointPanel] = None
+        self._hardware_panel: Optional[HardwarePanel] = None
         
         # Display control panel
         self._display_folder_handle: Optional[viser.GuiFolderHandle] = None
@@ -260,9 +261,73 @@ class ROS2ViserVisualizer:
         if self.config.auto_connect:
             self.ros2_interface.connect()
             logger.info("Connected to ROS2 Robot Interface")
+            # Note: Hardware node check will be done in _init_viser_unlocked() after server is created
         
         # Note: Robot description is now tracked by ros2_interface
         # We'll poll it in the update loop or wait for it to be available
+    
+    def _check_hardware_nodes(self):
+        """Check for hardware system nodes and initialize hardware panel if needed.
+        
+        This method is called after connecting to ROS2 interface to detect
+        any node whose name contains "system" (case-insensitive) and show
+        the hardware panel accordingly. If "m6_ccs_system" is detected,
+        a configuration button will be shown in the panel.
+        """
+        if self.ros2_interface is None or not self.ros2_interface.is_connected:
+            return
+        
+        if self.server is None:
+            return
+        
+        try:
+            # Query node list
+            nodes = self.ros2_interface.list_nodes()
+            
+            # Check for any node whose name contains "system" (case-insensitive)
+            has_system_node = False
+            has_m6_ccs_system = False
+            detected_system_nodes = []
+            
+            for node in nodes:
+                node_name_lower = node['name'].lower()
+                # Check if node name contains "system" (any node with "system" in its name)
+                if 'system' in node_name_lower:
+                    has_system_node = True
+                    detected_system_nodes.append(node['full_name'])
+                    logger.info(f"Hardware system node detected: {node['full_name']}")
+                
+                # Specifically check for m6_ccs_system
+                if 'm6_ccs_system' in node_name_lower:
+                    has_m6_ccs_system = True
+                    logger.info(f"M6 CCS System node detected: {node['full_name']}")
+            
+            # Initialize hardware panel if any system node is detected
+            if has_system_node:
+                logger.info(f"Found {len(detected_system_nodes)} system node(s): {', '.join(detected_system_nodes)}")
+                
+                # Cleanup existing hardware panel if any
+                if self._hardware_panel is not None:
+                    try:
+                        self._hardware_panel.cleanup()
+                    except Exception as e:
+                        logger.warning(f"Error cleaning up Hardware panel: {e}")
+                    self._hardware_panel = None
+                
+                # Create and initialize hardware panel
+                self._hardware_panel = HardwarePanel(
+                    self.server,
+                    self.ros2_interface,
+                    has_m6_ccs_system=has_m6_ccs_system
+                )
+                self._hardware_panel.initialize()
+                logger.info("✅ Hardware panel initialized")
+            else:
+                logger.debug("No system node detected (no node name contains 'system'), hardware panel not shown")
+                
+        except Exception as e:
+            logger.warning(f"Failed to check hardware nodes: {e}")
+            # Don't raise - this is not critical
     
     def _check_robot_description_from_interface(self):
         """Check robot description from ros2_interface (called from update loop, not callback).
@@ -330,6 +395,13 @@ class ROS2ViserVisualizer:
                     logger.warning(f"Error cleaning up Joint panel during reinit: {e}")
                 self._joint_panel = None
             
+            if self._hardware_panel is not None:
+                try:
+                    self._hardware_panel.cleanup()
+                except Exception as e:
+                    logger.warning(f"Error cleaning up Hardware panel during reinit: {e}")
+                self._hardware_panel = None
+            
             # Reinitialize panels if enabled
             if self.config.enable_fsm_panel:
                 self._fsm_panel = FSMPanel(
@@ -386,6 +458,10 @@ class ROS2ViserVisualizer:
                     # Initialize markers (will be done when interface is ready)
                     self._marker_manager.initialize()
                     logger.info("✅ Marker manager reinitialized")
+            
+            # Recheck hardware nodes and reinitialize hardware panel if needed
+            if self.ros2_interface is not None and self.ros2_interface.is_connected:
+                self._check_hardware_nodes()
                 
         except Exception as e:
             logger.error(f"Failed to reinitialize panels: {e}", exc_info=True)
@@ -675,6 +751,11 @@ class ROS2ViserVisualizer:
                         urdf=self.urdf  # Pass pre-parsed URDF to avoid re-parsing
                     )
                     self._joint_panel.initialize()
+                
+                # Check for hardware system nodes and initialize hardware panel if needed
+                # This is done after server is created and other panels are initialized
+                if self.ros2_interface is not None and self.ros2_interface.is_connected:
+                    self._check_hardware_nodes()
             
             # Create URDF visualization
             logger.debug(f"Creating ViserUrdf with {len(self.urdf_all_joint_names)} joints...")
@@ -932,14 +1013,21 @@ class ROS2ViserVisualizer:
         
 
         logger.info("Waiting for robot description from topic...")
-        max_wait_time = 30.0  # seconds
+        max_wait_time = self.config.robot_description_timeout  # seconds
+        # If timeout is 0, wait indefinitely (no timeout check)
+        wait_indefinitely = (max_wait_time == 0.0)
         start_time = time.time()
         check_interval = 2.0  # Print status every 2 seconds
         
         last_status_time = start_time
         robot_description = None
         
-        while robot_description is None and (time.time() - start_time) < max_wait_time:
+        while robot_description is None:
+            # Check timeout only if not waiting indefinitely
+            if not wait_indefinitely:
+                if (time.time() - start_time) >= max_wait_time:
+                    break
+            
             # Poll robot_description from interface (non-blocking)
             # The executor thread in ros2_interface is already running, so callbacks are being processed
             if self.ros2_interface is not None and self.ros2_interface.is_connected:
@@ -952,12 +1040,19 @@ class ROS2ViserVisualizer:
             
             elapsed = time.time() - start_time
             if time.time() - last_status_time >= check_interval:
-                logger.info(f"Still waiting for robot description... ({elapsed:.1f}s / {max_wait_time:.1f}s)")
+                if wait_indefinitely:
+                    logger.info(f"Still waiting for robot description... ({elapsed:.1f}s, waiting indefinitely)")
+                else:
+                    logger.info(f"Still waiting for robot description... ({elapsed:.1f}s / {max_wait_time:.1f}s)")
                 last_status_time = time.time()
             time.sleep(0.1)
         
         if robot_description is None or len(robot_description.strip()) == 0:
-            logger.error(f"Timeout after {max_wait_time}s waiting for robot description")
+            if wait_indefinitely:
+                # This shouldn't happen if waiting indefinitely, but handle it just in case
+                logger.error("Failed to receive robot description (waiting indefinitely)")
+            else:
+                logger.error(f"Timeout after {max_wait_time}s waiting for robot description")
             logger.error("Please check:")
             logger.error("  1. Is /robot_description topic being published?")
             logger.error("  2. Is robot_state_publisher node running?")
@@ -988,6 +1083,12 @@ class ROS2ViserVisualizer:
                 self._gripper_panel.cleanup()
             except Exception as e:
                 logger.warning(f"Error cleaning up Gripper panel: {e}")
+        
+        if self._hardware_panel is not None:
+            try:
+                self._hardware_panel.cleanup()
+            except Exception as e:
+                logger.warning(f"Error cleaning up Hardware panel: {e}")
         
         # Wait for update thread first (it uses ros2_interface)
         if self._update_thread is not None:

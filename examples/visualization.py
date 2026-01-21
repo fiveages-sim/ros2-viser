@@ -20,7 +20,8 @@ def main():
         robot_description_topic="/robot_description",
         joint_states_topic="/joint_states",
         root_node_name="/robot",
-        update_rate=30.0
+        update_rate=30.0,
+        robot_description_timeout=0.0
     )
     
     # Create and start visualizer

@@ -59,6 +59,41 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "switch_to_joint_control_state": "请切换到支持关节控制的状态 (OCS2 或 MOVEJ)",
         "ready": "就绪",
         
+        # Hardware Panel
+        "hardware_control": "硬件控制",
+        "hardware_system_detected": "硬件系统已检测",
+        "m6_ccs_system_detected": "M6 CCS 系统已检测",
+        "configure_m6_ccs_system": "配置 M6 CCS 系统",
+        "m6_ccs_system_config_clicked": "M6 CCS 系统配置",
+        "m6_ccs_configuration": "M6 CCS 配置",
+        
+        # M6 CCS Parameter Names
+        "param_ctrl_mode": "控制模式",
+        "param_max_joint_speed": "最大关节速度",
+        "param_max_joint_acceleration": "最大关节加速度",
+        "param_cart_d_gains": "笛卡尔阻尼增益",
+        "param_cart_k_gains": "笛卡尔刚度增益",
+        "param_joint_d_gains": "关节阻尼增益",
+        "param_joint_k_gains": "关节刚度增益",
+        "param_left_dyn_param": "左末端动力学参数",
+        "param_left_kine_param": "左末端运动学参数",
+        "param_right_dyn_param": "右末端动力学参数",
+        "param_right_kine_param": "右末端运动学参数",
+        
+        # Control Mode Options
+        "ctrl_mode_position": "位置控制",
+        "ctrl_mode_joint_impedance": "关节阻抗控制",
+        "ctrl_mode_cart_impedance": "笛卡尔阻抗控制",
+        "configuration_parameter": "配置参数",
+        "enter_config_value": "请输入配置值",
+        "enable_feature": "启用功能",
+        "confirm": "确认",
+        "cancel": "取消",
+        "configuration_saved": "配置已保存",
+        "no_parameters_found": "未找到参数",
+        "no_writable_parameters": "无可写参数",
+        "no_changes": "无更改",
+        
         # Messages
         "no_collision_meshes": "URDF 中没有碰撞网格",
         "collision_meshes_loaded": "碰撞网格已加载",
@@ -103,6 +138,26 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "waiting_for_joints": "Waiting for joints initialization",
         "switch_to_joint_control_state": "Please switch to joint control state (OCS2 or MOVEJ)",
         "ready": "Ready",
+        
+        # Hardware Panel
+        "hardware_control": "Hardware Control",
+        "hardware_system_detected": "Hardware system detected",
+        "m6_ccs_system_detected": "M6 CCS system detected",
+        "configure_m6_ccs_system": "Configure M6 CCS System",
+        "m6_ccs_system_config_clicked": "M6 CCS system configuration",
+        "m6_ccs_configuration": "M6 CCS Configuration",
+        "configuration_parameter": "Configuration Parameter",
+        "enter_config_value": "Enter configuration value",
+        "enable_feature": "Enable Feature",
+        "confirm": "Confirm",
+        "cancel": "Cancel",
+        "configuration_saved": "Configuration saved",
+        "no_parameters_found": "No parameters found",
+        "no_writable_parameters": "No writable parameters",
+        "no_changes": "No changes",
+        "no_parameters_found": "No parameters found",
+        "no_writable_parameters": "No writable parameters",
+        "no_changes": "No changes",
         
         # Messages
         "no_collision_meshes": "No collision meshes in URDF",

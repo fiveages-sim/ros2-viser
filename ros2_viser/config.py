@@ -63,3 +63,8 @@ class ROS2ViserConfig:
     
     language: str = "zh"
     """Language for GUI labels. Options: "zh" (Chinese) or "en" (English). Default: "zh" """
+    
+    robot_description_timeout: float = 30.0
+    """Timeout in seconds for waiting for robot description from ROS2 topic.
+    Set to 0.0 to wait indefinitely (no timeout).
+    Default: 30.0 seconds"""
