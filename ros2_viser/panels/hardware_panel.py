@@ -204,6 +204,63 @@ class HardwarePanel:
         # This method is here for consistency with other panels
         pass
     
+    def update_gui_labels(self):
+        """Update GUI labels with current language without recreating subscriptions.
+        
+        This method only updates the text/labels of GUI elements, preserving
+        all state and subscriptions.
+        """
+        if not self._initialized or self._cleaned_up or self.server is None:
+            return
+        
+        try:
+            # Viser folders don't support renaming, so we need to recreate the folder
+            # But we'll keep the state intact
+            old_folder = self._folder_handle
+            
+            # Store current status value
+            current_status_value = None
+            if self._status_text is not None:
+                current_status_value = self._status_text.value
+            
+            # Create new folder with new language
+            self._folder_handle = self.server.gui.add_folder(self.translator("hardware_control"))
+            
+            # Recreate GUI elements in new folder
+            with self._folder_handle:
+                # Status display
+                status_text = self.translator("hardware_system_detected")
+                if self.has_m6_ccs_system:
+                    status_text += f" ({self.translator('m6_ccs_system_detected')})"
+                
+                # Use current value if available, otherwise use default
+                status_value = current_status_value if current_status_value else status_text
+                
+                self._status_text = self.server.gui.add_text(
+                    self.translator("status"),
+                    initial_value=status_value,
+                    disabled=True
+                )
+                
+                # M6 CCS System configuration button (only shown if m6_ccs_system is detected)
+                if self.has_m6_ccs_system:
+                    self._m6_ccs_config_button = self.server.gui.add_button(
+                        self.translator("configure_m6_ccs_system"),
+                        color="green"
+                    )
+                    self._m6_ccs_config_button.on_click(
+                        lambda _: self._on_m6_ccs_config_clicked()
+                    )
+            
+            # Remove old folder
+            if old_folder is not None:
+                old_folder.remove()
+            
+            logger.debug("Hardware panel GUI labels updated")
+            
+        except Exception as e:
+            logger.warning(f"Failed to update Hardware panel GUI labels: {e}", exc_info=True)
+    
     def cleanup(self):
         """Cleanup the Hardware panel and remove GUI elements."""
         if self._cleaned_up:

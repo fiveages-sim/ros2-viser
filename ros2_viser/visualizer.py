@@ -508,6 +508,13 @@ class ROS2ViserVisualizer:
                     logger.info("✅ Joint panel labels updated with new language")
                 except Exception as e:
                     logger.warning(f"Failed to update Joint panel labels: {e}")
+            
+            if self._hardware_panel is not None:
+                try:
+                    self._hardware_panel.update_gui_labels()
+                    logger.info("✅ Hardware panel labels updated with new language")
+                except Exception as e:
+                    logger.warning(f"Failed to update Hardware panel labels: {e}")
                 
         except Exception as e:
             logger.error(f"Failed to update panels with new language: {e}", exc_info=True)
