@@ -569,14 +569,16 @@ class ROS2ViserVisualizer:
         self._reinitialize_panels_with_language()
     
     def _update_urdf_display(self):
-        """Update URDF visualization based on display settings."""
+        """Update URDF visualization based on display settings.
+        
+        Uses ViserUrdf's show_visual and show_collision attributes to control display.
+        Ensures frame nodes remain visible to preserve frame hierarchy.
+        """
         if self.urdf_vis is None or self.server is None:
             return
         
         try:
-            # Method 1: Try to access ViserUrdf's internal attributes to control display
-            # ViserUrdf has show_visual and show_collision attributes
-            # Suppress warnings when setting show_collision if no collision meshes exist
+            # Use ViserUrdf's built-in attributes (following official demo pattern)
             if hasattr(self.urdf_vis, 'show_visual'):
                 try:
                     self.urdf_vis.show_visual = self._show_visual
@@ -585,10 +587,7 @@ class ROS2ViserVisualizer:
                     logger.debug(f"Could not set show_visual: {e}")
             
             if hasattr(self.urdf_vis, 'show_collision'):
-                # Suppress the warning about no collision meshes - this is expected
-                # if the URDF doesn't have collision geometry defined
                 with warnings.catch_warnings():
-                    # Filter out warnings about collision meshes not being loaded
                     warnings.filterwarnings(
                         "ignore",
                         message=".*Cannot set.*show_collision.*",
@@ -605,57 +604,30 @@ class ROS2ViserVisualizer:
                     except Exception as e:
                         logger.debug(f"Could not set show_collision: {e}")
             
-            # Method 2: Try to access scene nodes and set visibility
-            # ViserUrdf creates scene nodes for visual and collision geometries
-            if hasattr(self.urdf_vis, 'scene_nodes'):
-                # If ViserUrdf has a scene_nodes attribute, update visibility
-                for node_name, node in self.urdf_vis.scene_nodes.items():
-                    if 'visual' in node_name.lower():
-                        # Set visual node visibility
-                        if hasattr(node, 'visible'):
-                            node.visible = self._show_visual
-                    elif 'collision' in node_name.lower():
-                        # Set collision node visibility
-                        if hasattr(node, 'visible'):
-                            node.visible = self._show_collision
-            
-            # Method 3: Access the server's scene and update node visibility directly
-            # Traverse scene nodes under the root node to find visual/collision meshes
+            # Ensure frame nodes remain visible even when meshes are hidden
             root_path = self.config.root_node_name
             try:
-                # Get all nodes in the scene that start with the root path
-                # ViserUrdf typically creates nodes like /robot/link_name/visual or /robot/link_name/collision
-                # We need to iterate through all scene nodes and update their visibility
-                
-                # Try to access scene's internal node structure
                 if hasattr(self.server.scene, '_nodes') or hasattr(self.server.scene, 'nodes'):
                     nodes_dict = getattr(self.server.scene, '_nodes', None) or getattr(self.server.scene, 'nodes', None)
                     if nodes_dict:
                         for node_path, node_obj in nodes_dict.items():
                             if node_path.startswith(root_path):
-                                # Check if this is a visual or collision node
-                                path_lower = node_path.lower()
-                                if '/visual' in path_lower or path_lower.endswith('/visual'):
-                                    # This is a visual node
+                                node_type_name = type(node_obj).__name__
+                                is_frame_node = 'Frame' in node_type_name and 'Handle' in node_type_name
+                                
+                                if is_frame_node:
                                     if hasattr(node_obj, 'visible'):
-                                        node_obj.visible = self._show_visual
+                                        if not node_obj.visible:
+                                            node_obj.visible = True
                                     elif hasattr(node_obj, 'set_visible'):
-                                        node_obj.set_visible(self._show_visual)
-                                elif '/collision' in path_lower or path_lower.endswith('/collision'):
-                                    # This is a collision node
-                                    if hasattr(node_obj, 'visible'):
-                                        node_obj.visible = self._show_collision
-                                    elif hasattr(node_obj, 'set_visible'):
-                                        node_obj.set_visible(self._show_collision)
-                
-                logger.debug(f"Updated display: visual={self._show_visual}, collision={self._show_collision}")
+                                        node_obj.set_visible(True)
+                        
+                        logger.debug(f"Updated display: visual={self._show_visual}, collision={self._show_collision} (frame hierarchy preserved)")
             except Exception as e:
-                logger.debug(f"Could not update scene node visibility directly: {e}")
+                logger.debug(f"Could not ensure frame node visibility: {e}")
                     
         except Exception as e:
             logger.warning(f"Failed to update URDF display: {e}")
-            # Log the error but don't raise - the visualization will still work
-            # even if we can't control visual/collision separately
     
     def _init_viser_unlocked(self):
         """Initialize Viser server and URDF visualization (without lock, assumes lock is already held)."""
@@ -803,17 +775,9 @@ class ROS2ViserVisualizer:
             if needs_reconnect and self._own_interface and self.ros2_interface is not None:
                 logger.info("Reconnecting ROS2RobotInterface to detect new controllers/topics...")
                 try:
-                    # Disconnect old interface
                     self.ros2_interface.disconnect()
-                    
-                    # Wait a bit for ROS2 to clean up old topic registrations
-                    # This prevents detecting stale topics from the previous connection
                     time.sleep(0.5)
-                    
-                    # Recreate interface with current configuration to ensure latest settings
-                    # This ensures gripper_enabled and other settings are up to date
                     self._init_ros2_interface()
-                    
                     logger.info("✅ ROS2RobotInterface reconnected successfully")
                     
                     # Reinitialize panels that depend on ros2_interface configuration

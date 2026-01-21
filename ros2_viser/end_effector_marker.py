@@ -58,37 +58,29 @@ class EndEffectorMarkerManager:
         self.urdf = urdf
         self.root_node_name = root_node_name
         
-        # Marker handles
         self._left_ee_marker: Optional[viser.TransformControlsHandle] = None
         self._right_ee_marker: Optional[viser.TransformControlsHandle] = None
-        self._ee_frame_node: Optional[viser.FrameHandle] = None  # Shared frame node for both arms
+        self._ee_frame_node: Optional[viser.FrameHandle] = None
         
-        # State tracking
-        self._last_left_ee_pose: Optional[Tuple] = None  # (position, wxyz) tuple
-        self._last_right_ee_pose: Optional[Tuple] = None  # (position, wxyz) tuple
+        self._last_left_ee_pose: Optional[Tuple] = None
+        self._last_right_ee_pose: Optional[Tuple] = None
         self._left_frame_id: Optional[str] = None
         self._right_frame_id: Optional[str] = None
         self._left_is_urdf_link: bool = False
         self._right_is_urdf_link: bool = False
-        self._marker_base_frame: Optional[str] = None  # Base frame for TF queries
+        self._left_urdf_frame_path: Optional[str] = None
+        self._right_urdf_frame_path: Optional[str] = None
+        self._marker_base_frame: Optional[str] = None
         
-        # FSM state tracking
-        self._last_fsm_mode: Optional[bool] = None  # Track previous OCS2 mode state
-        
-        # Publish mode
+        self._last_fsm_mode: Optional[bool] = None
         self._marker_continuous_publish: bool = config.marker_continuous_publish
         self._pending_left_pose: Optional[Tuple] = None
         self._pending_right_pose: Optional[Tuple] = None
-        
-        # Target pose tracking
-        self._last_left_target_pose: Optional[Any] = None  # geometry_msgs.msg.Pose
-        self._last_right_target_pose: Optional[Any] = None  # geometry_msgs.msg.Pose
-        
-        # Cooldown for feedback loop prevention
+        self._last_left_target_pose: Optional[Any] = None
+        self._last_right_target_pose: Optional[Any] = None
         self._last_marker_update_time: float = 0.0
-        self._marker_update_cooldown: float = 0.5  # seconds
+        self._marker_update_cooldown: float = 0.5
         
-        # GUI controls (created externally, managed here)
         self._marker_publish_mode_dropdown: Optional[viser.GuiDropdownHandle] = None
         self._send_marker_pose_button: Optional[viser.GuiButtonHandle] = None
         
@@ -105,14 +97,12 @@ class EndEffectorMarkerManager:
             return
         
         try:
-            # Initialize left arm marker if available
             if self.ros2_interface.left_arm_handler is not None:
                 logger.debug("Initializing left arm marker...")
                 self._init_single_ee_marker("left")
             else:
                 logger.debug("Left arm handler is None, skipping left marker")
             
-            # Initialize right arm marker if available
             if self.ros2_interface.right_arm_handler is not None:
                 logger.debug("Initializing right arm marker...")
                 self._init_single_ee_marker("right")
@@ -175,7 +165,6 @@ class EndEffectorMarkerManager:
         if self.ros2_interface is None or not self.ros2_interface.is_connected:
             return
         
-        # Initialize markers if not yet initialized
         if not self._initialized:
             left_needs_init = self._left_ee_marker is None and self.ros2_interface.left_arm_handler is not None
             right_needs_init = self._right_ee_marker is None and self.ros2_interface.right_arm_handler is not None
@@ -193,79 +182,53 @@ class EndEffectorMarkerManager:
                 except Exception as e:
                     logger.warning(f"Error initializing end-effector markers: {e}", exc_info=True)
         
-        # Always update frame node positions based on TF
-        self._update_frame_nodes()
-        
-        # Check if in OCS2 mode
         is_ocs2 = self._is_ocs2_mode()
         
-        # Detect transition into OCS2 mode and reset marker positions
         if is_ocs2 and self._last_fsm_mode is False:
             logger.info("Entered OCS2 mode, resetting marker positions to current end-effector poses")
             self._reset_marker_positions()
         
-        # Update last FSM mode state
         self._last_fsm_mode = is_ocs2
-        
-        # Update marker visibility based on FSM state
         self._update_marker_visibility(is_ocs2)
-        
-        # Update GUI control visibility
         self._update_gui_visibility(is_ocs2)
         
-        # Only process marker updates and send commands if in OCS2 mode
         if not is_ocs2:
             return
         
-        # Update marker positions from current target poses (if changed)
         target_pose_updated = self._update_markers_from_target_poses()
-        
-        # Update left arm marker
         if self._left_ee_marker is not None and self.ros2_interface.left_arm_handler is not None:
             current_position = tuple(self._left_ee_marker.position)
             current_wxyz = tuple(self._left_ee_marker.wxyz)
             current_pose = (current_position, current_wxyz)
             
-            # Check if marker has moved (only if not updated from target pose in this cycle)
             if not target_pose_updated and self._last_left_ee_pose != current_pose:
-                # Update cooldown timestamp when user moves marker
                 self._last_marker_update_time = time.time()
                 
                 if self._marker_continuous_publish:
-                    # Continuous mode: send immediately
                     self._send_pose_command("left", current_pose)
                     self._last_left_ee_pose = current_pose
                 else:
-                    # Single-shot mode: save to pending, don't send yet
                     self._pending_left_pose = current_pose
                     self._last_left_ee_pose = current_pose
                     logger.debug("Left arm marker moved, saved to pending (single-shot mode)")
             elif target_pose_updated:
-                # If target pose updated the marker, sync _last_left_ee_pose but don't trigger cooldown
                 self._last_left_ee_pose = current_pose
-        
-        # Update right arm marker
         if self._right_ee_marker is not None and self.ros2_interface.right_arm_handler is not None:
             current_position = tuple(self._right_ee_marker.position)
             current_wxyz = tuple(self._right_ee_marker.wxyz)
             current_pose = (current_position, current_wxyz)
             
-            # Check if marker has moved (only if not updated from target pose in this cycle)
             if not target_pose_updated and self._last_right_ee_pose != current_pose:
-                # Update cooldown timestamp when user moves marker
                 self._last_marker_update_time = time.time()
                 
                 if self._marker_continuous_publish:
-                    # Continuous mode: send immediately
                     self._send_pose_command("right", current_pose)
                     self._last_right_ee_pose = current_pose
                 else:
-                    # Single-shot mode: save to pending, don't send yet
                     self._pending_right_pose = current_pose
                     self._last_right_ee_pose = current_pose
                     logger.debug("Right arm marker moved, saved to pending (single-shot mode)")
             elif target_pose_updated:
-                # If target pose updated the marker, sync _last_right_ee_pose but don't trigger cooldown
                 self._last_right_ee_pose = current_pose
     
     def on_publish_mode_changed(self, mode_display: str):
@@ -274,14 +237,12 @@ class EndEffectorMarkerManager:
         Args:
             mode_display: Display name of selected mode.
         """
-        # Map display name to mode
         continuous_text = self.translator("continuous_publish")
         is_continuous = (mode_display == continuous_text)
         
         self._marker_continuous_publish = is_continuous
         self.config.marker_continuous_publish = is_continuous
         
-        # Update button visibility (only show in OCS2 mode and single-shot mode)
         if self._send_marker_pose_button is not None:
             is_ocs2 = self._is_ocs2_mode()
             self._send_marker_pose_button.visible = is_ocs2 and not is_continuous
@@ -298,16 +259,13 @@ class EndEffectorMarkerManager:
             logger.warning("ROS2 interface not connected, cannot send marker pose")
             return
         
-        # Check if both arms have pending poses
         has_left = self._pending_left_pose is not None
         has_right = self._pending_right_pose is not None
         
         if has_left and has_right:
-            # Both arms: use dual_arm_target_stamped
             try:
                 from geometry_msgs.msg import Pose
                 
-                # Convert left pose
                 left_position, left_wxyz = self._pending_left_pose
                 left_pose = Pose()
                 left_pose.position.x = left_position[0]
@@ -318,7 +276,6 @@ class EndEffectorMarkerManager:
                 left_pose.orientation.y = left_wxyz[2]
                 left_pose.orientation.z = left_wxyz[3]
                 
-                # Convert right pose
                 right_position, right_wxyz = self._pending_right_pose
                 right_pose = Pose()
                 right_pose.position.x = right_position[0]
@@ -329,31 +286,24 @@ class EndEffectorMarkerManager:
                 right_pose.orientation.y = right_wxyz[2]
                 right_pose.orientation.z = right_wxyz[3]
                 
-                # Get frame_ids
                 left_frame_id = self._left_frame_id or self.ros2_interface.left_arm_handler.get_frame_id()
                 right_frame_id = self._right_frame_id or self.ros2_interface.right_arm_handler.get_frame_id()
-                
-                # Use left arm's frame_id as default
                 common_frame_id = left_frame_id or (self._marker_base_frame if self._marker_base_frame is not None else "base_link")
                 
                 if left_frame_id != right_frame_id:
                     logger.debug(f"Left and right arms have different frame_ids ({left_frame_id} vs {right_frame_id}), using left arm's frame_id: {common_frame_id}")
                 
-                # Send dual arm target
                 self.ros2_interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id=common_frame_id)
                 logger.info(f"Sent dual arm target poses (single-shot mode, frame: {common_frame_id}, no transformation)")
                 
-                # Clear pending poses
                 self._pending_left_pose = None
                 self._pending_right_pose = None
             except Exception as e:
                 logger.error(f"Failed to send dual arm target poses: {e}", exc_info=True)
         elif has_left:
-            # Only left arm: use send_target_stamped
             self._send_pose_command_stamped("left", self._pending_left_pose)
             self._pending_left_pose = None
         elif has_right:
-            # Only right arm: use send_target_stamped
             self._send_pose_command_stamped("right", self._pending_right_pose)
             self._pending_right_pose = None
         else:
@@ -369,12 +319,12 @@ class EndEffectorMarkerManager:
     
     # Private methods
     
-    def _get_link_frame_path(self, link_name: str, prefer_collision: bool = True) -> Optional[str]:
+    def _get_link_frame_path(self, link_name: str, prefer_collision: bool = False) -> Optional[str]:
         """Get the viser scene path for a URDF link.
         
         Args:
             link_name: Name of the link in the URDF
-            prefer_collision: If True, prefer collision scene path
+            prefer_collision: If True, prefer collision scene path (default: False, prefer visual)
             
         Returns:
             Viser scene path for the link, or None if not found
@@ -382,7 +332,34 @@ class EndEffectorMarkerManager:
         if self.urdf is None:
             return None
         
-        # Try collision scene first (if available and preferred)
+        # Prefer visual scene first (usually always visible)
+        # Try visual scene first
+        if hasattr(self.urdf, 'scene'):
+            try:
+                scene = self.urdf.scene
+                base = scene.graph.base_frame
+                parents = scene.graph.transforms.parents
+                
+                if link_name == base:
+                    return f"{self.root_node_name}/visual"
+                
+                if link_name in parents:
+                    frames = []
+                    current = link_name
+                    while current != base and current in parents:
+                        frames.append(current)
+                        current = parents[current]
+                    
+                    if current == base:
+                        frames.append(base)
+                        path_parts = frames[::-1]
+                        viser_path = f"{self.root_node_name}/visual/" + "/".join(path_parts[1:])
+                        logger.debug(f"Using visual scene path for link '{link_name}': {viser_path}")
+                        return viser_path
+            except Exception as e:
+                logger.debug(f"Error computing visual scene path for {link_name}: {e}")
+        
+        # Fallback to collision scene (if preferred or visual not available)
         if prefer_collision and hasattr(self.urdf, 'collision_scene') and self.urdf.collision_scene is not None:
             try:
                 scene = self.urdf.collision_scene
@@ -408,33 +385,82 @@ class EndEffectorMarkerManager:
             except Exception as e:
                 logger.debug(f"Error computing collision scene path for {link_name}: {e}")
         
-        # Fallback to visual scene
-        if hasattr(self.urdf, 'scene'):
-            try:
+        return None
+    
+    def _get_urdf_link_transform(self, link_name: str, base_frame: str = None) -> Optional[Tuple]:
+        """Get the transform from base_frame (or URDF root) to a URDF link.
+        
+        Args:
+            link_name: Name of the link in the URDF
+            base_frame: Base frame name (if None, uses URDF root)
+            
+        Returns:
+            Tuple of (position, wxyz) or None if not found
+        """
+        if self.urdf is None:
+            return None
+        
+        try:
+            scene = None
+            if hasattr(self.urdf, 'scene') and self.urdf.scene is not None:
                 scene = self.urdf.scene
-                base = scene.graph.base_frame
-                parents = scene.graph.transforms.parents
-                
-                if link_name == base:
-                    return f"{self.root_node_name}/visual"
-                
-                if link_name not in parents:
+            elif hasattr(self.urdf, 'collision_scene') and self.urdf.collision_scene is not None:
+                scene = self.urdf.collision_scene
+            else:
+                return None
+            
+            graph = scene.graph
+            base = graph.base_frame
+            
+            if base_frame is not None and base_frame != base:
+                base_to_root = self._get_urdf_link_transform(base_frame, None)
+                if base_to_root is None:
                     return None
                 
-                frames = []
-                current = link_name
-                while current != base and current in parents:
-                    frames.append(current)
-                    current = parents[current]
+                root_to_link = self._get_urdf_link_transform(link_name, None)
+                if root_to_link is None:
+                    return None
                 
-                if current == base:
-                    frames.append(base)
-                    path_parts = frames[::-1]
-                    viser_path = f"{self.root_node_name}/visual/" + "/".join(path_parts[1:])
-                    logger.debug(f"Using visual scene path for link '{link_name}': {viser_path}")
-                    return viser_path
+                return None
+            
+            if link_name == base:
+                return ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0))
+            
+            if link_name not in graph.transforms.parents:
+                return None
+            
+            try:
+                transform = graph.get_transform(base, link_name)
+                if transform is not None:
+                    import numpy as np
+                    trans = transform[:3, 3]
+                    rot_matrix = transform[:3, :3]
+                    
+                    try:
+                        from scipy.spatial.transform import Rotation
+                        rot = Rotation.from_matrix(rot_matrix)
+                        quat = rot.as_quat()
+                        wxyz = (float(quat[3]), float(quat[0]), float(quat[1]), float(quat[2]))
+                    except ImportError:
+                        trace = rot_matrix[0, 0] + rot_matrix[1, 1] + rot_matrix[2, 2]
+                        if trace > 0:
+                            s = np.sqrt(trace + 1.0) * 2
+                            w = 0.25 * s
+                            x = (rot_matrix[2, 1] - rot_matrix[1, 2]) / s
+                            y = (rot_matrix[0, 2] - rot_matrix[2, 0]) / s
+                            z = (rot_matrix[1, 0] - rot_matrix[0, 1]) / s
+                            wxyz = (float(w), float(x), float(y), float(z))
+                        else:
+                            wxyz = (1.0, 0.0, 0.0, 0.0)
+                    
+                    position = (float(trans[0]), float(trans[1]), float(trans[2]))
+                    return (position, wxyz)
             except Exception as e:
-                logger.debug(f"Error computing visual scene path for {link_name}: {e}")
+                logger.debug(f"Error getting URDF transform for {link_name}: {e}")
+                return None
+        except Exception as e:
+            logger.debug(f"Error accessing URDF scene for {link_name}: {e}")
+            return None
         
         return None
     
@@ -460,70 +486,48 @@ class EndEffectorMarkerManager:
             logger.warning(f"{arm} arm handler is None, cannot create marker")
             return
         
-        # Get frame_id for this arm
         frame_id = handler.get_frame_id()
         if frame_id is None:
             logger.warning(f"Could not get frame_id for {arm} arm, will use default base_link")
             frame_id = "base_link"
         
-        # Set base_frame from left arm's frame_id
         if arm == "left" and self._marker_base_frame is None:
             self._marker_base_frame = frame_id
             logger.info(f"Set marker base_frame to '{frame_id}' from left arm handler")
         
-        # Check if frame_id is a URDF link
         link_frame_path = self._get_link_frame_path(frame_id)
         is_urdf_link = link_frame_path is not None
-        
-        # Store frame_id and whether it's a URDF link
         if arm == "left":
             self._left_frame_id = frame_id
             self._left_is_urdf_link = is_urdf_link
+            if is_urdf_link and link_frame_path is not None:
+                self._left_urdf_frame_path = link_frame_path
         else:
             self._right_frame_id = frame_id
             self._right_is_urdf_link = is_urdf_link
+            if is_urdf_link and link_frame_path is not None:
+                self._right_urdf_frame_path = link_frame_path
         
-        # Always create independent frame node
-        frame_node_name = f"/frames/{arm}_arm_frame"
-        marker_name = f"{frame_node_name}/ee_target"
-        
-        if is_urdf_link:
-            logger.info(f"Frame '{frame_id}' is a URDF link, using independent frame node updated from URDF/TF for {arm} arm")
+        if is_urdf_link and link_frame_path is not None:
+            marker_name = f"{link_frame_path}/ee_target_{arm}"
+            logger.info(f"Frame '{frame_id}' is a URDF link, binding marker to shared URDF frame '{link_frame_path}' for {arm} arm")
         else:
-            logger.info(f"Frame '{frame_id}' is not a URDF link, using TF-based frame node for {arm} arm")
-        
-        # Get initial transform from base_frame to frame_id
-        frame_position = (0.0, 0.0, 0.0)
-        frame_wxyz = (1.0, 0.0, 0.0, 0.0)  # Identity
-        
-        if self._marker_base_frame is not None and frame_id != self._marker_base_frame:
-            try:
-                transform = self.ros2_interface.lookup_transform(self._marker_base_frame, frame_id)
-                if transform is not None:
-                    trans = transform.transform.translation
-                    rot = transform.transform.rotation
-                    frame_position = (float(trans.x), float(trans.y), float(trans.z))
-                    frame_wxyz = (float(rot.w), float(rot.x), float(rot.y), float(rot.z))
-                    logger.debug(f"Got initial transform from {self._marker_base_frame} to {frame_id} for {arm} arm via TF")
-                else:
-                    logger.warning(f"Could not get transform from {self._marker_base_frame} to {frame_id}, using identity")
-            except Exception as e:
-                logger.warning(f"Error getting transform for {arm} arm frame: {e}, using identity")
-        
-        # Create independent frame node (only once, shared by both arms)
-        if self._ee_frame_node is None:
-            try:
-                self._ee_frame_node = self.server.scene.add_frame(
-                    frame_node_name,
-                    show_axes=False
-                )
-                self._ee_frame_node.position = frame_position
-                self._ee_frame_node.wxyz = frame_wxyz
-                logger.info(f"Created shared frame node '{frame_node_name}' for both arms (frame_id: {frame_id})")
-            except Exception as e:
-                logger.warning(f"Failed to create shared frame node: {e}")
-        
-        # Get current end-effector pose
+            frame_node_name = f"/frames/{arm}_arm_frame"
+            marker_name = f"{frame_node_name}/ee_target"
+            
+            logger.info(f"Frame '{frame_id}' is not a URDF link, using independent frame node in world coordinates for {arm} arm")
+            
+            if self._ee_frame_node is None:
+                try:
+                    self._ee_frame_node = self.server.scene.add_frame(
+                        frame_node_name,
+                        show_axes=False
+                    )
+                    self._ee_frame_node.position = (0.0, 0.0, 0.0)
+                    self._ee_frame_node.wxyz = (1.0, 0.0, 0.0, 0.0)
+                    logger.info(f"Created independent frame node '{frame_node_name}' in world coordinates (frame_id: {frame_id})")
+                except Exception as e:
+                    logger.warning(f"Failed to create independent frame node: {e}")
         current_pose = handler.get_pose()
         if current_pose is None:
             current_pose = handler.get_target_pose()
@@ -533,21 +537,6 @@ class EndEffectorMarkerManager:
             position = (0.5, 0.0, 0.5)
             wxyz = (1.0, 0.0, 0.0, 0.0)
         else:
-            # Convert pose from base_frame to frame_id coordinate system
-            if self._marker_base_frame is not None and frame_id != self._marker_base_frame:
-                try:
-                    transformed_pose = self.ros2_interface.transform_pose(
-                        current_pose, self._marker_base_frame, frame_id
-                    )
-                    if transformed_pose is not None:
-                        current_pose = transformed_pose
-                        logger.debug(f"Transformed pose from {self._marker_base_frame} to {frame_id} for {arm} arm")
-                    else:
-                        logger.warning(f"Could not transform pose from {self._marker_base_frame} to {frame_id}, using original pose")
-                except Exception as e:
-                    logger.warning(f"Error transforming pose for {arm} arm: {e}, using original pose")
-            
-            # Convert ROS2 pose (xyzw) to viser format (wxyz)
             position = (
                 float(current_pose.position.x),
                 float(current_pose.position.y),
@@ -560,7 +549,6 @@ class EndEffectorMarkerManager:
                 float(current_pose.orientation.z)
             )
         
-        # Create transform controls (draggable marker)
         try:
             logger.debug(f"Creating {arm} arm marker at path '{marker_name}' with position {position}, wxyz {wxyz}")
             if arm == "left":
@@ -645,13 +633,10 @@ class EndEffectorMarkerManager:
         
         marker_updated = False
         
-        # Check cooldown period to avoid feedback loop
         current_time = time.time()
         time_since_last_update = current_time - self._last_marker_update_time
         if time_since_last_update < self._marker_update_cooldown:
             return False
-        
-        # Update left arm marker from target pose
         if self._left_ee_marker is not None and self.ros2_interface.left_arm_handler is not None:
             try:
                 target_pose = self.ros2_interface.left_arm_handler.get_target_pose()
@@ -669,36 +654,21 @@ class EndEffectorMarkerManager:
                     
                     if target_changed:
                         if self._left_frame_id is not None:
-                            pose_to_use = target_pose
-                            if self._marker_base_frame is not None and self._left_frame_id != self._marker_base_frame:
-                                try:
-                                    transformed_pose = self.ros2_interface.transform_pose(
-                                        target_pose, self._marker_base_frame, self._left_frame_id
-                                    )
-                                    if transformed_pose is not None:
-                                        pose_to_use = transformed_pose
-                                    else:
-                                        logger.debug("Could not transform left target pose, using original")
-                                except Exception as e:
-                                    logger.debug(f"Error transforming left target pose: {e}, using original")
-                            
                             position = (
-                                float(pose_to_use.position.x),
-                                float(pose_to_use.position.y),
-                                float(pose_to_use.position.z)
+                                float(target_pose.position.x),
+                                float(target_pose.position.y),
+                                float(target_pose.position.z)
                             )
                             wxyz = (
-                                float(pose_to_use.orientation.w),
-                                float(pose_to_use.orientation.x),
-                                float(pose_to_use.orientation.y),
-                                float(pose_to_use.orientation.z)
+                                float(target_pose.orientation.w),
+                                float(target_pose.orientation.x),
+                                float(target_pose.orientation.y),
+                                float(target_pose.orientation.z)
                             )
                             
                             self._left_ee_marker.position = position
                             self._left_ee_marker.wxyz = wxyz
                             marker_updated = True
-                            
-                            # Store a copy of the target pose for comparison
                             from geometry_msgs.msg import Pose
                             self._last_left_target_pose = Pose()
                             self._last_left_target_pose.position.x = target_pose.position.x
@@ -732,36 +702,21 @@ class EndEffectorMarkerManager:
                     
                     if target_changed:
                         if self._right_frame_id is not None:
-                            pose_to_use = target_pose
-                            if self._marker_base_frame is not None and self._right_frame_id != self._marker_base_frame:
-                                try:
-                                    transformed_pose = self.ros2_interface.transform_pose(
-                                        target_pose, self._marker_base_frame, self._right_frame_id
-                                    )
-                                    if transformed_pose is not None:
-                                        pose_to_use = transformed_pose
-                                    else:
-                                        logger.debug("Could not transform right target pose, using original")
-                                except Exception as e:
-                                    logger.debug(f"Error transforming right target pose: {e}, using original")
-                            
                             position = (
-                                float(pose_to_use.position.x),
-                                float(pose_to_use.position.y),
-                                float(pose_to_use.position.z)
+                                float(target_pose.position.x),
+                                float(target_pose.position.y),
+                                float(target_pose.position.z)
                             )
                             wxyz = (
-                                float(pose_to_use.orientation.w),
-                                float(pose_to_use.orientation.x),
-                                float(pose_to_use.orientation.y),
-                                float(pose_to_use.orientation.z)
+                                float(target_pose.orientation.w),
+                                float(target_pose.orientation.x),
+                                float(target_pose.orientation.y),
+                                float(target_pose.orientation.z)
                             )
                             
                             self._right_ee_marker.position = position
                             self._right_ee_marker.wxyz = wxyz
                             marker_updated = True
-                            
-                            # Store a copy of the target pose for comparison
                             from geometry_msgs.msg import Pose
                             self._last_right_target_pose = Pose()
                             self._last_right_target_pose.position.x = target_pose.position.x
@@ -784,7 +739,6 @@ class EndEffectorMarkerManager:
         if self.ros2_interface is None or not self.ros2_interface.is_connected:
             return
         
-        # Reset left arm marker
         if self._left_ee_marker is not None and self.ros2_interface.left_arm_handler is not None:
             try:
                 current_pose = self.ros2_interface.left_arm_handler.get_pose()
@@ -792,18 +746,6 @@ class EndEffectorMarkerManager:
                     current_pose = self.ros2_interface.left_arm_handler.get_target_pose()
                 
                 if current_pose is not None and self._left_frame_id is not None:
-                    if self._marker_base_frame is not None and self._left_frame_id != self._marker_base_frame:
-                        try:
-                            transformed_pose = self.ros2_interface.transform_pose(
-                                current_pose, self._marker_base_frame, self._left_frame_id
-                            )
-                            if transformed_pose is not None:
-                                current_pose = transformed_pose
-                            else:
-                                logger.warning(f"Could not transform pose from {self._marker_base_frame} to {self._left_frame_id} for reset")
-                        except Exception as e:
-                            logger.warning(f"Error transforming pose for left arm reset: {e}")
-                    
                     position = (
                         float(current_pose.position.x),
                         float(current_pose.position.y),
@@ -825,7 +767,6 @@ class EndEffectorMarkerManager:
             except Exception as e:
                 logger.warning(f"Failed to reset left arm marker position: {e}")
         
-        # Reset right arm marker
         if self._right_ee_marker is not None and self.ros2_interface.right_arm_handler is not None:
             try:
                 current_pose = self.ros2_interface.right_arm_handler.get_pose()
@@ -833,18 +774,6 @@ class EndEffectorMarkerManager:
                     current_pose = self.ros2_interface.right_arm_handler.get_target_pose()
                 
                 if current_pose is not None and self._right_frame_id is not None:
-                    if self._marker_base_frame is not None and self._right_frame_id != self._marker_base_frame:
-                        try:
-                            transformed_pose = self.ros2_interface.transform_pose(
-                                current_pose, self._marker_base_frame, self._right_frame_id
-                            )
-                            if transformed_pose is not None:
-                                current_pose = transformed_pose
-                            else:
-                                logger.warning(f"Could not transform pose from {self._marker_base_frame} to {self._right_frame_id} for reset")
-                        except Exception as e:
-                            logger.warning(f"Error transforming pose for right arm reset: {e}")
-                    
                     position = (
                         float(current_pose.position.x),
                         float(current_pose.position.y),
@@ -865,34 +794,6 @@ class EndEffectorMarkerManager:
                     logger.warning("Could not get current pose for right arm, cannot reset marker")
             except Exception as e:
                 logger.warning(f"Failed to reset right arm marker position: {e}")
-    
-    def _update_frame_nodes(self):
-        """Update independent frame node positions based on TF transforms."""
-        if self.ros2_interface is None or not self.ros2_interface.is_connected:
-            return
-        
-        # Update shared frame node
-        if self._ee_frame_node is not None and self._left_frame_id is not None:
-            if self._marker_base_frame is not None and self._left_frame_id != self._marker_base_frame:
-                try:
-                    transform = self.ros2_interface.lookup_transform(
-                        self._marker_base_frame, self._left_frame_id
-                    )
-                    if transform is not None:
-                        trans = transform.transform.translation
-                        rot = transform.transform.rotation
-                        self._ee_frame_node.position = (
-                            float(trans.x), float(trans.y), float(trans.z)
-                        )
-                        self._ee_frame_node.wxyz = (
-                            float(rot.w), float(rot.x), float(rot.y), float(rot.z)
-                        )
-                except Exception as e:
-                    logger.debug(f"Could not update shared frame node: {e}")
-            else:
-                # Frame is base_frame, set to identity
-                self._ee_frame_node.position = (0.0, 0.0, 0.0)
-                self._ee_frame_node.wxyz = (1.0, 0.0, 0.0, 0.0)
     
     def _send_pose_command(self, arm: str, pose_tuple: Tuple):
         """Send pose command for the specified arm (continuous mode).
