@@ -48,7 +48,7 @@ class FSMPanel:
         self.translator = get_translator()
         
         # FSM state tracking
-        self._current_fsm_state: str = "HOLD"
+        self._current_fsm_state: str = "INVALID"
         
         # GUI elements
         self._fsm_state_label: Optional[viser.GuiTextHandle] = None
@@ -56,8 +56,6 @@ class FSMPanel:
         self._fsm_switch_pose_button: Optional[viser.GuiButtonHandle] = None
         # Folder handle for cleanup
         self._folder_handle: Optional[viser.GuiFolderHandle] = None
-        
-        # Note: No direct subscription - use ros2_interface.get_fsm_state() instead
         
         # Initialization flag
         self._initialized = False
@@ -192,97 +190,38 @@ class FSMPanel:
         This method should be called periodically from the main update loop
         (not from ROS2 callbacks) to avoid blocking the executor.
         """
-        if not self._initialized or self.server is None or not self._fsm_button_handles:
-            return
+        current_state = self.ros2_interface.get_fsm_state()
+        if current_state != self._current_fsm_state:
+            logger.debug(f"FSM state changed: {self._current_fsm_state} → {current_state}")
+            self._current_fsm_state = current_state
         
-        try:
-            # Get FSM state from ros2_interface
-            if self.ros2_interface is not None and self.ros2_interface.is_connected:
-                try:
-                    current_state = self.ros2_interface.get_fsm_state()
-                    # Only update if state is in known valid states (HOME, HOLD, OCS2, MOVEJ)
-                    # For special commands (100, 0, etc.), keep the previous state
-                    valid_states = {"HOME", "HOLD", "OCS2", "MOVEJ"}
-                    if current_state in valid_states:
-                        if current_state != self._current_fsm_state:
-                            logger.debug(f"FSM state changed: {self._current_fsm_state} → {current_state}")
-                            self._current_fsm_state = current_state
-                    else:
-                        # Unknown state (e.g., from command 100 or 0), keep previous state
-                        logger.debug(f"FSM command returned unknown state '{current_state}', keeping previous state '{self._current_fsm_state}'")
-                except Exception as e:
-                    logger.debug(f"Could not get FSM state from ros2_interface: {e}")
-                    # Fall back to cached state
-            else:
-                # Fall back to cached state if interface not available
-                pass
-            
-            # Use cached state for display
-            current_state = self._current_fsm_state
-            
-            # Update state label
-            if self._fsm_state_label is not None:
-                self._fsm_state_label.value = current_state
-            
-            # Update button visibility based on current state
-            # Show buttons for states that can be reached from current state
-            if current_state == "HOME":
-                # HOME state: can go to HOLD, can switch pose
-                if "to_home" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_home"].visible = False
-                if "to_hold" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_hold"].visible = True
-                if "to_ocs2" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_ocs2"].visible = False
-                if "to_movej" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_movej"].visible = False
-                if self._fsm_switch_pose_button is not None:
-                    self._fsm_switch_pose_button.visible = True
-            elif current_state == "HOLD":
-                # HOLD state: can go to HOME, OCS2, or MOVEJ
-                if "to_home" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_home"].visible = True
-                if "to_hold" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_hold"].visible = False
-                if "to_ocs2" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_ocs2"].visible = True
-                if "to_movej" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_movej"].visible = True
-                if self._fsm_switch_pose_button is not None:
-                    self._fsm_switch_pose_button.visible = False
-            elif current_state == "OCS2":
-                # OCS2 state: can only go to HOLD
-                if "to_home" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_home"].visible = False
-                if "to_hold" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_hold"].visible = True
-                if "to_ocs2" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_ocs2"].visible = False
-                if "to_movej" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_movej"].visible = False
-                if self._fsm_switch_pose_button is not None:
-                    self._fsm_switch_pose_button.visible = False
-            elif current_state == "MOVEJ":
-                # MOVEJ state: can only go to HOLD
-                if "to_home" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_home"].visible = False
-                if "to_hold" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_hold"].visible = True
-                if "to_ocs2" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_ocs2"].visible = False
-                if "to_movej" in self._fsm_button_handles:
-                    self._fsm_button_handles["to_movej"].visible = False
-                if self._fsm_switch_pose_button is not None:
-                    self._fsm_switch_pose_button.visible = False
-            else:
-                # Unknown state: hide all buttons
-                for handle in self._fsm_button_handles.values():
-                    handle.visible = False
-                if self._fsm_switch_pose_button is not None:
-                    self._fsm_switch_pose_button.visible = False
-                    
-        except Exception as e:
-            logger.warning(f"Failed to update FSM panel: {e}")
+        if current_state == "HOME":
+            self._fsm_button_handles["to_home"].visible = False
+            self._fsm_button_handles["to_hold"].visible = True
+            self._fsm_button_handles["to_ocs2"].visible = False
+            self._fsm_button_handles["to_movej"].visible = False
+            self._fsm_switch_pose_button.visible = True
+        elif current_state == "HOLD":
+            self._fsm_button_handles["to_home"].visible = True
+            self._fsm_button_handles["to_hold"].visible = False
+            self._fsm_button_handles["to_ocs2"].visible = True
+            self._fsm_button_handles["to_movej"].visible = True
+            self._fsm_switch_pose_button.visible = False
+        elif current_state == "OCS2":
+            self._fsm_button_handles["to_home"].visible = False
+            self._fsm_button_handles["to_hold"].visible = True
+            self._fsm_button_handles["to_ocs2"].visible = False
+            self._fsm_button_handles["to_movej"].visible = False
+            self._fsm_switch_pose_button.visible = False
+        elif current_state == "MOVEJ":
+            # MOVEJ state: can only go to HOLD
+            self._fsm_button_handles["to_home"].visible = False
+            self._fsm_button_handles["to_hold"].visible = True
+            self._fsm_button_handles["to_ocs2"].visible = False
+            self._fsm_button_handles["to_movej"].visible = False
+            self._fsm_switch_pose_button.visible = False
+        else:
+            logger.warning(f"Unknown FSM state: {current_state}")
     
     def update_gui_labels(self):
         """Update GUI labels with current language without recreating subscriptions.

@@ -801,20 +801,11 @@ class ROS2ViserVisualizer:
     def _update_loop(self):
         """Update loop for robot visualization."""
         update_period = 1.0 / self.config.update_rate
-        last_joint_state_log = 0.0
-        last_fsm_panel_update = 0.0
-        last_gripper_panel_update = 0.0
-        last_joint_panel_update = 0.0
-        log_interval = 5.0  # Log joint state status every 5 seconds
-        fsm_panel_update_interval = 0.1  # Update FSM panel every 100ms
-        gripper_panel_update_interval = 0.1  # Update Gripper panel every 100ms
-        joint_panel_update_interval = 0.1  # Update Joint panel every 100ms
         
         # Initialize to True because interface is already connected in start() method
         last_is_connected = True
         
         while self._running:
-            current_time = time.time()
             
             # Check current connection state
             is_connected = (self.ros2_interface is not None and self.ros2_interface.is_connected)
@@ -850,134 +841,35 @@ class ROS2ViserVisualizer:
                 # Update connection state (interface is connected at this point)
                 last_is_connected = True
             
-            # Update FSM panel periodically (not in ROS2 callback to avoid blocking)
-            if self._fsm_panel is not None and (current_time - last_fsm_panel_update) >= fsm_panel_update_interval:
-                try:
-                    self._fsm_panel.update()
-                    last_fsm_panel_update = current_time
-                except Exception as e:
-                    logger.warning(f"Failed to update FSM panel in update loop: {e}")
-            
-            # Update Gripper panel periodically (not in ROS2 callback to avoid blocking)
-            if self._gripper_panel is not None and (current_time - last_gripper_panel_update) >= gripper_panel_update_interval:
-                try:
-                    self._gripper_panel.update()
-                    last_gripper_panel_update = current_time
-                except Exception as e:
-                    logger.warning(f"Failed to update Gripper panel in update loop: {e}")
-            
-            # Update Joint panel periodically (not in ROS2 callback to avoid blocking)
-            if self._joint_panel is not None and (current_time - last_joint_panel_update) >= joint_panel_update_interval:
-                try:
-                    self._joint_panel.update()
-                    last_joint_panel_update = current_time
-                except Exception as e:
-                    logger.warning(f"Failed to update Joint panel in update loop: {e}")
-            
-            # Update end-effector markers (check for changes and send commands)
-            if self._marker_manager is not None:
-                try:
-                    self._marker_manager.update()
-                except Exception as e:
-                    logger.debug(f"Error updating end-effector markers: {e}")
+            self._fsm_panel.update()
+            self._gripper_panel.update()
+            self._joint_panel.update()
+            self._marker_manager.update()
             
             # Update URDF visualization
-            if self.urdf_vis is not None and self.ros2_interface is not None:
-                # Check if interface is connected before using it
-                if not self.ros2_interface.is_connected:
-                    # Log periodically if interface is not connected
-                    if current_time - last_joint_state_log >= log_interval:
-                        logger.debug("ROS2RobotInterface is not connected, waiting for reconnection...")
-                        last_joint_state_log = current_time
+            if self.urdf_vis is not None:
+                joint_state = self.ros2_interface.get_joint_state()
+                if joint_state is None:
                     time.sleep(update_period)
                     continue
                 
-                # Get joint state from ROS2 interface
-                joint_state = self.ros2_interface.get_joint_state()
+                joint_positions = self._map_joint_states(
+                    joint_state['names'],
+                    joint_state['positions']
+                )
+
+                self.urdf_vis.update_cfg(joint_positions)   # Update URDF visualization
                 
-                if joint_state is not None:
-                    # Map joint states to URDF joint order
-                    joint_positions = self._map_joint_states(
-                        joint_state['names'],
-                        joint_state['positions']
-                    )
-                    
-                    if joint_positions is not None:
-                        # Update visualization
-                        # _map_joint_states already returns a properly formatted numpy array
-                        try:
-                            # Ensure array is contiguous (for performance)
-                            if not joint_positions.flags['C_CONTIGUOUS']:
-                                joint_positions = np.ascontiguousarray(joint_positions, dtype=np.float64)
-                            
-                            if self._last_joint_positions is not None:
-                                if np.array_equal(joint_positions, self._last_joint_positions):
-                                    pass  # Skip update, but continue with sleep
-                                else:
-                                    # Values changed, update visualization
-                                    self.urdf_vis.update_cfg(joint_positions)
-                                    # Cache the updated positions
-                                    self._last_joint_positions = joint_positions.copy()
-                            else:
-                                # First update, always perform it
-                                self.urdf_vis.update_cfg(joint_positions)
-                                # Cache the updated positions
-                                self._last_joint_positions = joint_positions.copy()
-                        except Exception as e:
-                            logger.warning(f"Failed to update visualization: {e}")
-                            if logger.isEnabledFor(logging.DEBUG):
-                                logger.debug(f"Joint positions type: {type(joint_positions)}, "
-                                           f"shape: {getattr(joint_positions, 'shape', 'N/A')}, "
-                                           f"dtype: {getattr(joint_positions, 'dtype', 'N/A')}")
-                                if hasattr(joint_positions, '__len__') and len(joint_positions) > 0:
-                                    logger.debug(f"First element type: {type(joint_positions[0]) if hasattr(joint_positions, '__getitem__') else 'N/A'}")
-                else:
-                    # Log periodically if joint state is None
-                    if current_time - last_joint_state_log >= log_interval:
-                        logger.debug("Joint state is None - waiting for joint state messages...")
-                        last_joint_state_log = current_time
-            elif self.urdf_vis is None:
-                # Log periodically if URDF visualization is not initialized
-                if current_time - last_joint_state_log >= log_interval:
-                    logger.debug("URDF visualization not initialized yet...")
-                    last_joint_state_log = current_time
-            elif self.ros2_interface is None:
-                # Log periodically if ROS2 interface is not available
-                if current_time - last_joint_state_log >= log_interval:
-                    logger.debug("ROS2 interface not available...")
-                    last_joint_state_log = current_time
-            
             time.sleep(update_period)
     
-    def _map_joint_states(self, joint_names: list[str], positions: list[float]) -> Optional[np.ndarray]:
-        """Map joint states from ROS2 topic to URDF joint order (ALL joints).
+    def _map_joint_states(self, joint_names: list[str], positions: list[float]) -> np.ndarray:
+        """Map joint states from ROS2 topic to URDF joint order (ALL joints)."""
+        if len(self.urdf_all_joint_names) == 0:
+            raise ValueError("URDF all joint names are not initialized")
         
-        Optimized version that minimizes dictionary lookups and type conversions.
-        
-        This function handles:
-        - Actuated joints: get value from joint state
-        - Mimic joints: compute from mimicked joint using multiplier and offset
-        - Fixed joints: use 0.0
-        
-        Args:
-            joint_names: Joint names from ROS2 topic
-            positions: Joint positions from ROS2 topic
-            
-        Returns:
-            Array of joint positions for ALL joints in URDF order, or None if mapping fails.
-        """
-        if not self.urdf_all_joint_names:
-            return None
-        
-        num_joints = len(self.urdf_all_joint_names)
-        
-        # Pre-allocate result array with zeros (default for all joints)
-        result = np.zeros(num_joints, dtype=np.float64)
-        
-        # Use precomputed mapping (computed once during URDF parsing)
+        result = np.zeros(len(self.urdf_all_joint_names), dtype=np.float64)
         for joint_name, position in zip(joint_names, positions):
             if joint_name in self._joint_name_to_urdf_index:
-                # Joint exists in URDF, set its value directly
                 urdf_index = self._joint_name_to_urdf_index[joint_name]
                 result[urdf_index] = position
         
