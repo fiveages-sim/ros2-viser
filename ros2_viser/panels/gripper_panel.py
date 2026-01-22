@@ -53,6 +53,9 @@ class GripperPanel:
         # Gripper state tracking
         self._left_gripper_open: bool = False
         self._right_gripper_open: bool = False
+        # Track previous state to detect changes
+        self._prev_left_gripper_open: Optional[bool] = None
+        self._prev_right_gripper_open: Optional[bool] = None
         
         # Detect dual-arm mode
         self._is_dual_arm: bool = False
@@ -100,6 +103,10 @@ class GripperPanel:
             # Reset cleanup flag
             self._cleaned_up = False
             
+            # Reset state tracking to ensure first update() call will update button visibility
+            self._prev_left_gripper_open = None
+            self._prev_right_gripper_open = None
+            
             # Initialize GUI
             self._init_gui()
             
@@ -140,18 +147,6 @@ class GripperPanel:
             logger.warning(f"Right gripper controller detected ({self.ros2_interface.config.right_gripper_controller_name or self.ros2_interface.config.right_gripper_command_topic}) but handler not created (gripper_enabled={self.ros2_interface.config.gripper_enabled})")
         
         self._is_dual_arm = has_left and has_right
-        
-        if not has_left and not has_right:
-            logger.info("No gripper controllers detected")
-        elif self._is_dual_arm:
-            logger.info("Detected mode: DUAL-ARM (left and right grippers)")
-        else:
-            if has_left and not has_right:
-                logger.info("Detected mode: SINGLE-ARM (left gripper only)")
-            elif has_right and not has_left:
-                logger.info("Detected mode: SINGLE-ARM (right gripper only)")
-            else:
-                logger.info("Detected mode: SINGLE-ARM")
     
     def _init_gui(self):
         """Initialize Gripper control panel GUI elements."""
@@ -212,9 +207,6 @@ class GripperPanel:
                 )
                 self._right_gripper_close_button.on_click(lambda _: self._on_gripper_command(GripperType.RIGHT, False))
                 
-                # Update button visibility based on detected mode
-                self._update_button_visibility()
-                
         except Exception as e:
             logger.error(f"Failed to initialize Gripper panel GUI: {e}", exc_info=True)
             raise
@@ -257,49 +249,6 @@ class GripperPanel:
         except Exception as e:
             logger.error(f"Failed to send gripper command: {e}", exc_info=True)
     
-    def _update_button_visibility(self):
-        """Update button visibility based on detected gripper mode and current state."""
-        has_left = self.ros2_interface.left_gripper_handler is not None
-        has_right = self.ros2_interface.right_gripper_handler is not None
-        
-        left_open = self._left_gripper_open
-        right_open = self._right_gripper_open
-        
-        if not has_left and not has_right:
-            # No grippers: hide all buttons
-            if self._left_gripper_open_button is not None:
-                self._left_gripper_open_button.visible = False
-            if self._left_gripper_close_button is not None:
-                self._left_gripper_close_button.visible = False
-            if self._right_gripper_open_button is not None:
-                self._right_gripper_open_button.visible = False
-            if self._right_gripper_close_button is not None:
-                self._right_gripper_close_button.visible = False
-        elif self._is_dual_arm:
-            # Dual arm mode: show buttons based on state
-            # Left gripper
-            if self._left_gripper_open_button is not None:
-                self._left_gripper_open_button.visible = not left_open  # Show Open if closed
-            if self._left_gripper_close_button is not None:
-                self._left_gripper_close_button.visible = left_open  # Show Close if open
-            # Right gripper
-            if self._right_gripper_open_button is not None:
-                self._right_gripper_open_button.visible = not right_open  # Show Open if closed
-            if self._right_gripper_close_button is not None:
-                self._right_gripper_close_button.visible = right_open  # Show Close if open
-        else:
-            # Single arm mode: show left buttons based on state, hide right buttons
-            # Left gripper
-            if self._left_gripper_open_button is not None:
-                self._left_gripper_open_button.visible = not left_open  # Show Open if closed
-            if self._left_gripper_close_button is not None:
-                self._left_gripper_close_button.visible = left_open  # Show Close if open
-            # Right gripper (hidden in single-arm mode)
-            if self._right_gripper_open_button is not None:
-                self._right_gripper_open_button.visible = False
-            if self._right_gripper_close_button is not None:
-                self._right_gripper_close_button.visible = False
-    
     def _get_display_name(self, controller_name: Optional[str]) -> str:
         """Get display name from controller name.
         
@@ -335,51 +284,44 @@ class GripperPanel:
         return name if name else "Gripper"
     
     def update(self):
-        """Update Gripper panel button text based on current state.
+        """Update Gripper panel button visibility based on current state.
         
         This method should be called periodically from the main update loop
         (not from ROS2 callbacks) to avoid blocking the executor.
+        Only updates button visibility when the state actually changes.
         """
         if not self._initialized or self.server is None:
             return
         
         try:
-            # Get state from gripper handlers (they subscribe to target_command internally)
-            if self.ros2_interface.left_gripper_handler is not None:
-                try:
-                    left_open = self.ros2_interface.left_gripper_handler.is_open
-                    self._left_gripper_open = left_open
-                except Exception as e:
-                    logger.debug(f"Could not get left gripper state from handler: {e}")
-                    left_open = self._left_gripper_open
-            else:
-                left_open = self._left_gripper_open
-            
-            if self.ros2_interface.right_gripper_handler is not None:
-                try:
-                    right_open = self.ros2_interface.right_gripper_handler.is_open
-                    self._right_gripper_open = right_open
-                except Exception as e:
-                    logger.debug(f"Could not get right gripper state from handler: {e}")
-                    right_open = self._right_gripper_open
-            else:
-                right_open = self._right_gripper_open
-            
-            # Update button visibility based on current state
+            # Get state from gripper handlers (only check handlers that exist)
             # Left gripper
             if self.ros2_interface.left_gripper_handler is not None:
-                if self._left_gripper_open_button is not None:
-                    self._left_gripper_open_button.visible = not left_open  # Show Open if closed
-                if self._left_gripper_close_button is not None:
-                    self._left_gripper_close_button.visible = left_open  # Show Close if open
+                left_open = self.ros2_interface.left_gripper_handler.is_open
+                self._left_gripper_open = left_open
+                left_changed = left_open != self._prev_left_gripper_open or self._prev_left_gripper_open is None
+                
+                if left_changed:
+                    self._prev_left_gripper_open = left_open
+                    if self._left_gripper_open_button is not None:
+                        self._left_gripper_open_button.visible = not left_open  # Show Open if closed
+                    if self._left_gripper_close_button is not None:
+                        self._left_gripper_close_button.visible = left_open  # Show Close if open
             
-            # Right gripper (only in dual-arm mode)
-            if (self._is_dual_arm and 
-                self.ros2_interface.right_gripper_handler is not None):
-                if self._right_gripper_open_button is not None:
-                    self._right_gripper_open_button.visible = not right_open  # Show Open if closed
-                if self._right_gripper_close_button is not None:
-                    self._right_gripper_close_button.visible = right_open  # Show Close if open
+            # Right gripper (only check if handler exists)
+            if self.ros2_interface.right_gripper_handler is not None:
+                right_open = self.ros2_interface.right_gripper_handler.is_open
+                self._right_gripper_open = right_open
+                right_changed = right_open != self._prev_right_gripper_open or self._prev_right_gripper_open is None
+                
+                if right_changed:
+                    self._prev_right_gripper_open = right_open
+                    # Only update buttons in dual-arm mode
+                    if self._is_dual_arm:
+                        if self._right_gripper_open_button is not None:
+                            self._right_gripper_open_button.visible = not right_open  # Show Open if closed
+                        if self._right_gripper_close_button is not None:
+                            self._right_gripper_close_button.visible = right_open  # Show Close if open
                     
         except Exception as e:
             logger.warning(f"Failed to update Gripper panel: {e}")
@@ -492,4 +434,9 @@ class GripperPanel:
         self._right_gripper_close_button = None
         self._folder_handle = None
         self._initialized = False
+        
+        # Reset state tracking
+        self._prev_left_gripper_open = None
+        self._prev_right_gripper_open = None
+        
         logger.debug("Gripper panel cleaned up")

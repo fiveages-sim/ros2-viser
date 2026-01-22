@@ -80,6 +80,7 @@ class EndEffectorMarkerManager:
         self._last_right_target_pose: Optional[Any] = None
         self._last_marker_update_time: float = 0.0
         self._marker_update_cooldown: float = 0.5
+        self._is_sending: bool = False  # Flag to prevent concurrent sends
         
         self._marker_publish_mode_dropdown: Optional[viser.GuiDropdownHandle] = None
         self._send_marker_pose_button: Optional[viser.GuiButtonHandle] = None
@@ -162,12 +163,15 @@ class EndEffectorMarkerManager:
         if not self.config.enable_end_effector_marker:
             return
         
-        if self.ros2_interface is None or not self.ros2_interface.is_connected:
+        ros2_interface = self.ros2_interface
+        if ros2_interface is None or not ros2_interface.is_connected:
             return
         
         if not self._initialized:
-            left_needs_init = self._left_ee_marker is None and self.ros2_interface.left_arm_handler is not None
-            right_needs_init = self._right_ee_marker is None and self.ros2_interface.right_arm_handler is not None
+            left_handler = ros2_interface.left_arm_handler
+            right_handler = ros2_interface.right_arm_handler
+            left_needs_init = self._left_ee_marker is None and left_handler is not None
+            right_needs_init = self._right_ee_marker is None and right_handler is not None
             
             if left_needs_init or right_needs_init:
                 try:
@@ -195,40 +199,95 @@ class EndEffectorMarkerManager:
         if not is_ocs2:
             return
         
+        # Cache references to avoid repeated attribute access
+        left_marker = self._left_ee_marker
+        right_marker = self._right_ee_marker
+        left_handler = ros2_interface.left_arm_handler
+        right_handler = ros2_interface.right_arm_handler
+        
         target_pose_updated = self._update_markers_from_target_poses()
-        if self._left_ee_marker is not None and self.ros2_interface.left_arm_handler is not None:
-            current_position = tuple(self._left_ee_marker.position)
-            current_wxyz = tuple(self._left_ee_marker.wxyz)
-            current_pose = (current_position, current_wxyz)
+        
+        # Process left arm marker
+        if left_marker is not None and left_handler is not None:
+            self._process_marker_update(
+                "left", left_marker, target_pose_updated, self._last_left_ee_pose
+            )
+        
+        # Process right arm marker
+        if right_marker is not None and right_handler is not None:
+            self._process_marker_update(
+                "right", right_marker, target_pose_updated, self._last_right_ee_pose
+            )
+    
+    def _process_marker_update(
+        self,
+        arm: str,
+        marker: viser.TransformControlsHandle,
+        target_pose_updated: bool,
+        last_pose: Optional[Tuple]
+    ):
+        """Process marker position update for a single arm.
+        
+        Args:
+            arm: "left" or "right"
+            marker: Marker handle
+            target_pose_updated: Whether marker was updated from target pose
+            last_pose: Last known pose (will be updated)
+        """
+        # Get marker position and orientation (avoid creating tuple if not needed)
+        marker_pos = marker.position
+        marker_wxyz = marker.wxyz
+        
+        # Quick check: compare individual values before creating tuple
+        if last_pose is not None:
+            last_pos, last_wxyz = last_pose
+            # Compare position and orientation with small epsilon
+            if (abs(marker_pos[0] - last_pos[0]) < 1e-6 and
+                abs(marker_pos[1] - last_pos[1]) < 1e-6 and
+                abs(marker_pos[2] - last_pos[2]) < 1e-6 and
+                abs(marker_wxyz[0] - last_wxyz[0]) < 1e-6 and
+                abs(marker_wxyz[1] - last_wxyz[1]) < 1e-6 and
+                abs(marker_wxyz[2] - last_wxyz[2]) < 1e-6 and
+                abs(marker_wxyz[3] - last_wxyz[3]) < 1e-6):
+                # No change, skip processing
+                if target_pose_updated:
+                    # Still update last pose if target was updated
+                    current_pose = (tuple(marker_pos), tuple(marker_wxyz))
+                    if arm == "left":
+                        self._last_left_ee_pose = current_pose
+                    else:
+                        self._last_right_ee_pose = current_pose
+                return
+        
+        # Position changed, create tuple and process
+        current_position = tuple(marker_pos)
+        current_wxyz = tuple(marker_wxyz)
+        current_pose = (current_position, current_wxyz)
+        
+        if not target_pose_updated:
+            self._last_marker_update_time = time.time()
             
-            if not target_pose_updated and self._last_left_ee_pose != current_pose:
-                self._last_marker_update_time = time.time()
-                
-                if self._marker_continuous_publish:
-                    self._send_pose_command("left", current_pose)
+            if self._marker_continuous_publish:
+                self._send_pose_command(arm, current_pose)
+                if arm == "left":
                     self._last_left_ee_pose = current_pose
                 else:
-                    self._pending_left_pose = current_pose
-                    self._last_left_ee_pose = current_pose
-                    logger.debug("Left arm marker moved, saved to pending (single-shot mode)")
-            elif target_pose_updated:
+                    self._last_right_ee_pose = current_pose
+            else:
+                # Only update pending pose if not currently sending
+                if not self._is_sending:
+                    if arm == "left":
+                        self._pending_left_pose = current_pose
+                        self._last_left_ee_pose = current_pose
+                    else:
+                        self._pending_right_pose = current_pose
+                        self._last_right_ee_pose = current_pose
+                    logger.debug(f"{arm.capitalize()} arm marker moved, saved to pending (single-shot mode)")
+        else:
+            # Target pose was updated, just sync last_pose
+            if arm == "left":
                 self._last_left_ee_pose = current_pose
-        if self._right_ee_marker is not None and self.ros2_interface.right_arm_handler is not None:
-            current_position = tuple(self._right_ee_marker.position)
-            current_wxyz = tuple(self._right_ee_marker.wxyz)
-            current_pose = (current_position, current_wxyz)
-            
-            if not target_pose_updated and self._last_right_ee_pose != current_pose:
-                self._last_marker_update_time = time.time()
-                
-                if self._marker_continuous_publish:
-                    self._send_pose_command("right", current_pose)
-                    self._last_right_ee_pose = current_pose
-                else:
-                    self._pending_right_pose = current_pose
-                    self._last_right_ee_pose = current_pose
-                    logger.debug("Right arm marker moved, saved to pending (single-shot mode)")
-            elif target_pose_updated:
+            else:
                 self._last_right_ee_pose = current_pose
     
     def on_publish_mode_changed(self, mode_display: str):
@@ -259,55 +318,70 @@ class EndEffectorMarkerManager:
             logger.warning("ROS2 interface not connected, cannot send marker pose")
             return
         
-        has_left = self._pending_left_pose is not None
-        has_right = self._pending_right_pose is not None
+        # Prevent concurrent sends
+        if self._is_sending:
+            logger.debug("Send already in progress, ignoring duplicate click")
+            return
         
-        if has_left and has_right:
-            try:
-                from geometry_msgs.msg import Pose
-                
-                left_position, left_wxyz = self._pending_left_pose
-                left_pose = Pose()
-                left_pose.position.x = left_position[0]
-                left_pose.position.y = left_position[1]
-                left_pose.position.z = left_position[2]
-                left_pose.orientation.w = left_wxyz[0]
-                left_pose.orientation.x = left_wxyz[1]
-                left_pose.orientation.y = left_wxyz[2]
-                left_pose.orientation.z = left_wxyz[3]
-                
-                right_position, right_wxyz = self._pending_right_pose
-                right_pose = Pose()
-                right_pose.position.x = right_position[0]
-                right_pose.position.y = right_position[1]
-                right_pose.position.z = right_position[2]
-                right_pose.orientation.w = right_wxyz[0]
-                right_pose.orientation.x = right_wxyz[1]
-                right_pose.orientation.y = right_wxyz[2]
-                right_pose.orientation.z = right_wxyz[3]
-                
-                left_frame_id = self._left_frame_id or self.ros2_interface.left_arm_handler.get_frame_id()
-                right_frame_id = self._right_frame_id or self.ros2_interface.right_arm_handler.get_frame_id()
-                common_frame_id = left_frame_id or (self._marker_base_frame if self._marker_base_frame is not None else "base_link")
-                
-                if left_frame_id != right_frame_id:
-                    logger.debug(f"Left and right arms have different frame_ids ({left_frame_id} vs {right_frame_id}), using left arm's frame_id: {common_frame_id}")
-                
-                self.ros2_interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id=common_frame_id)
-                logger.info(f"Sent dual arm target poses (single-shot mode, frame: {common_frame_id}, no transformation)")
-                
-                self._pending_left_pose = None
-                self._pending_right_pose = None
-            except Exception as e:
-                logger.error(f"Failed to send dual arm target poses: {e}", exc_info=True)
-        elif has_left:
-            self._send_pose_command_stamped("left", self._pending_left_pose)
-            self._pending_left_pose = None
-        elif has_right:
-            self._send_pose_command_stamped("right", self._pending_right_pose)
-            self._pending_right_pose = None
-        else:
-            logger.warning("No pending poses to send")
+        # Capture pending poses and clear them immediately to prevent race conditions
+        # This ensures that update() won't interfere during sending
+        pending_left = self._pending_left_pose
+        pending_right = self._pending_right_pose
+        
+        # Clear immediately to prevent update() from modifying them
+        self._pending_left_pose = None
+        self._pending_right_pose = None
+        
+        has_left = pending_left is not None
+        has_right = pending_right is not None
+        
+        # Set sending flag to prevent concurrent sends
+        self._is_sending = True
+        try:
+            if has_left and has_right:
+                try:
+                    from geometry_msgs.msg import Pose
+                    
+                    left_position, left_wxyz = pending_left
+                    left_pose = Pose()
+                    left_pose.position.x = left_position[0]
+                    left_pose.position.y = left_position[1]
+                    left_pose.position.z = left_position[2]
+                    left_pose.orientation.w = left_wxyz[0]
+                    left_pose.orientation.x = left_wxyz[1]
+                    left_pose.orientation.y = left_wxyz[2]
+                    left_pose.orientation.z = left_wxyz[3]
+                    
+                    right_position, right_wxyz = pending_right
+                    right_pose = Pose()
+                    right_pose.position.x = right_position[0]
+                    right_pose.position.y = right_position[1]
+                    right_pose.position.z = right_position[2]
+                    right_pose.orientation.w = right_wxyz[0]
+                    right_pose.orientation.x = right_wxyz[1]
+                    right_pose.orientation.y = right_wxyz[2]
+                    right_pose.orientation.z = right_wxyz[3]
+                    
+                    left_frame_id = self._left_frame_id or self.ros2_interface.left_arm_handler.get_frame_id()
+                    right_frame_id = self._right_frame_id or self.ros2_interface.right_arm_handler.get_frame_id()
+                    common_frame_id = left_frame_id or (self._marker_base_frame if self._marker_base_frame is not None else "base_link")
+                    
+                    if left_frame_id != right_frame_id:
+                        logger.debug(f"Left and right arms have different frame_ids ({left_frame_id} vs {right_frame_id}), using left arm's frame_id: {common_frame_id}")
+                    
+                    self.ros2_interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id=common_frame_id)
+                    logger.info(f"Sent dual arm target poses (single-shot mode, frame: {common_frame_id}, no transformation)")
+                except Exception as e:
+                    logger.error(f"Failed to send dual arm target poses: {e}", exc_info=True)
+            elif has_left:
+                self._send_pose_command_stamped("left", pending_left)
+            elif has_right:
+                self._send_pose_command_stamped("right", pending_right)
+            else:
+                logger.warning("No pending poses to send")
+        finally:
+            # Always clear the sending flag, even if an exception occurred
+            self._is_sending = False
     
     def set_urdf(self, urdf: Optional[yourdfpy.URDF]):
         """Update URDF reference (called when URDF changes).

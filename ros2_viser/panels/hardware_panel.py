@@ -24,9 +24,6 @@ class HardwarePanel:
         ```python
         panel = HardwarePanel(server, ros2_interface, has_m6_ccs_system=True)
         panel.initialize()
-        
-        # In update loop:
-        panel.update()
         ```
     """
     
@@ -194,15 +191,6 @@ class HardwarePanel:
             
         except Exception as e:
             logger.error(f"Error cancelling configuration: {e}", exc_info=True)
-    
-    def update(self):
-        """Update the Hardware panel (called periodically from update loop)."""
-        if not self._initialized or self._cleaned_up:
-            return
-        
-        # Currently no periodic updates needed
-        # This method is here for consistency with other panels
-        pass
     
     def update_gui_labels(self):
         """Update GUI labels with current language without recreating subscriptions.

@@ -97,8 +97,6 @@ class ROS2ViserVisualizer:
         self._show_visual_checkbox: Optional[viser.GuiCheckboxHandle] = None
         self._show_collision_checkbox: Optional[viser.GuiCheckboxHandle] = None
         self._language_dropdown: Optional[viser.GuiDropdownHandle] = None
-        self._marker_publish_mode_dropdown: Optional[viser.GuiDropdownHandle] = None
-        self._send_marker_pose_button: Optional[viser.GuiButtonHandle] = None
         self._show_visual: bool = True
         self._show_collision: bool = False
         
@@ -388,9 +386,22 @@ class ROS2ViserVisualizer:
                 self._fsm_panel = FSMPanel(
                     self.server,
                     self.ros2_interface,
-                    self.config.fsm_command_topic
+                    self.config.fsm_command_topic,
+                    self.config
                 )
                 self._fsm_panel.initialize()
+                # Connect marker controls to marker manager if available
+                if self._marker_manager is not None and self.config.enable_end_effector_marker:
+                    marker_dropdown, marker_button = self._fsm_panel.get_marker_controls()
+                    if marker_dropdown is not None and marker_button is not None:
+                        self._marker_manager.set_gui_controls(marker_dropdown, marker_button)
+                        # Set up callbacks
+                        marker_dropdown.on_update(
+                            lambda _: self._on_marker_publish_mode_changed(marker_dropdown.value)
+                        )
+                        marker_button.on_click(
+                            lambda _: self._on_send_marker_pose_clicked()
+                        )
                 logger.info("✅ FSM panel reinitialized")
             
             if self.config.enable_gripper_panel:
@@ -429,12 +440,16 @@ class ROS2ViserVisualizer:
                         self.urdf,
                         self.config.root_node_name
                     )
-                    # Connect GUI controls if they exist
-                    if self._marker_publish_mode_dropdown is not None:
-                        self._marker_manager.set_gui_controls(
-                            self._marker_publish_mode_dropdown,
-                            self._send_marker_pose_button
-                        )
+                    # Connect GUI controls from FSM panel if available
+                    if self._fsm_panel is not None and self.config.enable_end_effector_marker:
+                        marker_dropdown, marker_button = self._fsm_panel.get_marker_controls()
+                        if marker_dropdown is not None and marker_button is not None:
+                            self._marker_manager.set_gui_controls(marker_dropdown, marker_button)
+                            # Set up callbacks via FSM panel
+                            self._fsm_panel.set_marker_callbacks(
+                                lambda _: self._on_marker_publish_mode_changed(marker_dropdown.value),
+                                lambda _: self._on_send_marker_pose_clicked()
+                            )
                     # Initialize markers (will be done when interface is ready)
                     self._marker_manager.initialize()
                     logger.info("✅ Marker manager reinitialized")
@@ -535,38 +550,6 @@ class ROS2ViserVisualizer:
                 self._show_collision_checkbox.on_update(
                     lambda _: self._on_show_collision_changed(self._show_collision_checkbox.value)
                 )
-                
-                # Marker publish mode selection (only if markers are enabled)
-                # These controls are only visible in OCS2 mode
-                if self.config.enable_end_effector_marker:
-                    self._marker_publish_mode_dropdown = self.server.gui.add_dropdown(
-                        self.translator("marker_publish_mode"),
-                        options=[self.translator("continuous_publish"), self.translator("single_publish")],
-                        initial_value=self.translator("continuous_publish") if self.config.marker_continuous_publish else self.translator("single_publish")
-                    )
-                    self._marker_publish_mode_dropdown.on_update(
-                        lambda _: self._on_marker_publish_mode_changed(self._marker_publish_mode_dropdown.value)
-                    )
-                    # Initially hide (will be shown when in OCS2 mode)
-                    self._marker_publish_mode_dropdown.visible = False
-                    
-                    # Send button for single-shot mode (initially hidden)
-                    self._send_marker_pose_button = self.server.gui.add_button(
-                        self.translator("send_marker_pose"),
-                        color="green"
-                    )
-                    self._send_marker_pose_button.on_click(
-                        lambda _: self._on_send_marker_pose_clicked()
-                    )
-                    # Initially hide (will be shown when in OCS2 mode and single-shot mode)
-                    self._send_marker_pose_button.visible = False
-                    
-                    # Connect GUI controls to marker manager (if it exists)
-                    if self._marker_manager is not None:
-                        self._marker_manager.set_gui_controls(
-                            self._marker_publish_mode_dropdown,
-                            self._send_marker_pose_button
-                        )
             
             logger.debug("Display control panel initialized")
         except Exception as e:
@@ -708,7 +691,8 @@ class ROS2ViserVisualizer:
                     self._fsm_panel = FSMPanel(
                         self.server,
                         self.ros2_interface,
-                        self.config.fsm_command_topic
+                        self.config.fsm_command_topic,
+                        self.config
                     )
                     self._fsm_panel.initialize()
                 
@@ -776,12 +760,16 @@ class ROS2ViserVisualizer:
                         self.urdf,
                         self.config.root_node_name
                     )
-                    # Connect GUI controls if they exist
-                    if self._marker_publish_mode_dropdown is not None:
-                        self._marker_manager.set_gui_controls(
-                            self._marker_publish_mode_dropdown,
-                            self._send_marker_pose_button
-                        )
+                    # Connect GUI controls from FSM panel if available
+                    if self._fsm_panel is not None:
+                        marker_dropdown, marker_button = self._fsm_panel.get_marker_controls()
+                        if marker_dropdown is not None and marker_button is not None:
+                            self._marker_manager.set_gui_controls(marker_dropdown, marker_button)
+                            # Set up callbacks via FSM panel
+                            self._fsm_panel.set_marker_callbacks(
+                                lambda _: self._on_marker_publish_mode_changed(marker_dropdown.value),
+                                lambda _: self._on_send_marker_pose_clicked()
+                            )
                     # Initialize markers (will be done when interface is ready)
                     self._marker_manager.initialize()
             

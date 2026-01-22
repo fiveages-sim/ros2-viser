@@ -548,12 +548,7 @@ class JointPanel:
                     disabled=True
                 )
                 
-                # Send button
-                self._send_button = self.server.gui.add_button(
-                    self.translator("send_joint_positions"),
-                    color="green"
-                )
-                self._send_button.on_click(lambda _: self._on_send_button_clicked())
+                # Send button will be created in _rebuild_joint_controls() to appear at the bottom
                 
         except Exception as e:
             logger.error(f"Failed to initialize Joint panel GUI: {e}", exc_info=True)
@@ -589,6 +584,14 @@ class JointPanel:
                 pass
         self._right_arm_controls.clear()
         
+        # Clear send button (will be recreated at the bottom)
+        if self._send_button is not None:
+            try:
+                self._send_button.remove()
+            except Exception:
+                pass
+            self._send_button = None
+        
         # Get joints for current category
         current_command = self._current_fsm_command
         
@@ -606,6 +609,15 @@ class JointPanel:
             # Create joint sliders (for all categories including left/right in MOVEJ mode)
             for joint_name in joints_to_show:
                 self._create_joint_control(joint_name)
+        
+        # Create send button at the bottom (after all controls)
+        if self._folder_handle is not None:
+            with self._folder_handle:
+                self._send_button = self.server.gui.add_button(
+                    self.translator("send_joint_positions"),
+                    color="green"
+                )
+                self._send_button.on_click(lambda _: self._on_send_button_clicked())
         
         # Update category dropdown options
         self._update_category_options()
@@ -909,8 +921,11 @@ class JointPanel:
             is_enabled = self._is_joint_control_enabled
             current_command = self._current_fsm_command
             
-            # Update status text
+            # Update status text (only visible when control is not enabled)
             if self._status_text is not None:
+                # Only show status text when control is not enabled
+                self._status_text.visible = not is_enabled
+                
                 if not self._joints_initialized:
                     self._status_text.value = self.translator("waiting_for_joints")
                 elif not is_enabled:
@@ -1010,11 +1025,7 @@ class JointPanel:
                     disabled=True
                 )
                 
-                self._send_button = self.server.gui.add_button(
-                    self.translator("send_joint_positions"),
-                    color="green"
-                )
-                self._send_button.on_click(lambda _: self._on_send_button_clicked())
+                # Send button will be created in _rebuild_joint_controls() to appear at the bottom
             
             # Rebuild joint controls
             self._rebuild_joint_controls()

@@ -60,7 +60,7 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "ready": "就绪",
         
         # Hardware Panel
-        "hardware_control": "硬件控制",
+        "hardware_control": "驱动层配置",
         "hardware_system_detected": "硬件系统已检测",
         "m6_ccs_system_detected": "M6 CCS 系统已检测",
         "configure_m6_ccs_system": "配置 M6 CCS 系统",
@@ -140,7 +140,7 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "ready": "Ready",
         
         # Hardware Panel
-        "hardware_control": "Hardware Control",
+        "hardware_control": "Hardware Config",
         "hardware_system_detected": "Hardware system detected",
         "m6_ccs_system_detected": "M6 CCS system detected",
         "configure_m6_ccs_system": "Configure M6 CCS System",

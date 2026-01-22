@@ -55,11 +55,11 @@ class ROS2ViserConfig:
     marker_scale: float = 0.15
     """Scale of the draggable marker. Default: 0.15"""
     
-    marker_continuous_publish: bool = True
+    marker_continuous_publish: bool = False
     """Whether to use continuous publish mode for end-effector markers.
     If True, marker position is published continuously while dragging.
     If False, marker position is only published when clicking the send button.
-    Default: True"""
+    Default: False"""
     
     language: str = "zh"
     """Language for GUI labels. Options: "zh" (Chinese) or "en" (English). Default: "zh" """
