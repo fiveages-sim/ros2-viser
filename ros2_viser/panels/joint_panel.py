@@ -123,7 +123,7 @@ class JointPanel:
             self.update()
             
             self._initialized = True
-            logger.info("✅ Joint control panel initialized")
+            logger.debug("✅ Joint control panel initialized")
             
         except Exception as e:
             logger.error(f"Failed to initialize Joint panel: {e}", exc_info=True)
@@ -489,9 +489,9 @@ class JointPanel:
         self._joints_initialized = True
         
         # Log and rebuild GUI OUTSIDE lock to avoid blocking
-        logger.info(f"Initialized {len(self._joint_names)} joints for control")
+        logger.debug(f"Initialized {len(self._joint_names)} joints for control")
         for cat, joints in self._category_to_joints.items():
-            logger.info(f"  {cat}: {len(joints)} joints")
+            logger.debug(f"  {cat}: {len(joints)} joints")
         
         # Load joint limits from URDF (outside lock to avoid blocking)
         if not self._joint_limits_initialized:

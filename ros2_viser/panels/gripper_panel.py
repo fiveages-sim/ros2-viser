@@ -79,6 +79,32 @@ class GripperPanel:
         # Cleanup flag to prevent callbacks from running after cleanup
         self._cleaned_up = False
     
+    def _has_gripper(self, gripper_type: GripperType) -> bool:
+        """Check if a gripper handler is available.
+        
+        Args:
+            gripper_type: LEFT or RIGHT gripper
+            
+        Returns:
+            True if gripper handler exists, False otherwise
+        """
+        if self.ros2_interface is None:
+            return False
+        if gripper_type == GripperType.LEFT:
+            return self.ros2_interface.left_gripper_handler is not None
+        else:
+            return self.ros2_interface.right_gripper_handler is not None
+    
+    def _get_gripper_handlers(self) -> tuple[bool, bool]:
+        """Get availability status of left and right grippers.
+        
+        Returns:
+            Tuple of (has_left, has_right) boolean values
+        """
+        has_left = self._has_gripper(GripperType.LEFT)
+        has_right = self._has_gripper(GripperType.RIGHT)
+        return has_left, has_right
+    
     def initialize(self):
         """Initialize the Gripper panel GUI and ROS2 subscriptions."""
         # If already initialized, cleanup first to avoid duplicates
@@ -91,8 +117,7 @@ class GripperPanel:
             self._detect_grippers()
             
             # Check if any gripper controllers are available
-            has_left = self.ros2_interface.left_gripper_handler is not None if self.ros2_interface else False
-            has_right = self.ros2_interface.right_gripper_handler is not None if self.ros2_interface else False
+            has_left, has_right = self._get_gripper_handlers()
             
             # Only initialize if at least one gripper controller is detected
             if not has_left and not has_right:
@@ -114,7 +139,7 @@ class GripperPanel:
             self.update()
             
             self._initialized = True
-            logger.info("✅ Gripper control panel initialized")
+            logger.debug("✅ Gripper control panel initialized")
             
         except Exception as e:
             logger.error(f"Failed to initialize Gripper panel: {e}", exc_info=True)
@@ -127,8 +152,7 @@ class GripperPanel:
             return
         
         # Check if left and right gripper handlers exist
-        has_left = self.ros2_interface.left_gripper_handler is not None
-        has_right = self.ros2_interface.right_gripper_handler is not None
+        has_left, has_right = self._get_gripper_handlers()
         
         # Also check config to see if controllers were detected but handlers not created
         left_controller_detected = (
@@ -148,68 +172,66 @@ class GripperPanel:
         
         self._is_dual_arm = has_left and has_right
     
+    def _create_gripper_buttons(self, gripper_type: GripperType, display_name: str):
+        """Create open and close buttons for a gripper.
+        
+        Args:
+            gripper_type: LEFT or RIGHT gripper
+            display_name: Display name for the gripper (e.g., "Left Hand", "Gripper")
+        """
+        open_text = self.translator("open")
+        close_text = self.translator("close")
+        
+        # Create open button (green)
+        open_button = self.server.gui.add_button(
+            f"{open_text} {display_name}",
+            color="green"
+        )
+        open_button.on_click(lambda _: self._on_gripper_command(gripper_type, True))
+        
+        # Create close button (red)
+        close_button = self.server.gui.add_button(
+            f"{close_text} {display_name}",
+            color="red"
+        )
+        close_button.on_click(lambda _: self._on_gripper_command(gripper_type, False))
+        
+        # Store button references
+        if gripper_type == GripperType.LEFT:
+            self._left_gripper_open_button = open_button
+            self._left_gripper_close_button = close_button
+        else:
+            self._right_gripper_open_button = open_button
+            self._right_gripper_close_button = close_button
+    
     def _init_gui(self):
         """Initialize Gripper control panel GUI elements."""
-        if self.server is None:
+        has_left, has_right = self._get_gripper_handlers()
+        
+        # Only create panel if at least one gripper controller is detected
+        if not has_left and not has_right:
+            logger.info("No gripper controllers detected, skipping EE Control panel")
             return
         
-        try:
-            # Check if any gripper controllers are available
-            has_left = self.ros2_interface.left_gripper_handler is not None
-            has_right = self.ros2_interface.right_gripper_handler is not None
-            
-            # Only create panel if at least one gripper controller is detected
-            if not has_left and not has_right:
-                logger.info("No gripper controllers detected, skipping EE Control panel")
-                return
-            
-            # Get display names from controller names
+        # Get display names from controller names
+        if has_left:
+            left_controller_name = self.ros2_interface.config.left_gripper_controller_name
+            self._left_display_name = self._get_display_name(left_controller_name)
+        
+        if has_right:
+            right_controller_name = self.ros2_interface.config.right_gripper_controller_name
+            self._right_display_name = self._get_display_name(right_controller_name)
+        
+        # Create folder and save reference for cleanup
+        self._folder_handle = self.server.gui.add_folder(self.translator("ee_control"))
+        with self._folder_handle:
+            # Create buttons for available grippers
             if has_left:
-                left_controller_name = self.ros2_interface.config.left_gripper_controller_name
-                self._left_display_name = self._get_display_name(left_controller_name)
+                self._create_gripper_buttons(GripperType.LEFT, self._left_display_name)
             
             if has_right:
-                right_controller_name = self.ros2_interface.config.right_gripper_controller_name
-                self._right_display_name = self._get_display_name(right_controller_name)
+                self._create_gripper_buttons(GripperType.RIGHT, self._right_display_name)
             
-            # Create folder and save reference for cleanup
-            self._folder_handle = self.server.gui.add_folder(self.translator("ee_control"))
-            with self._folder_handle:
-                # Left gripper buttons (Open and Close)
-                # Open button - Green
-                open_text = self.translator("open")
-                close_text = self.translator("close")
-                self._left_gripper_open_button = self.server.gui.add_button(
-                    f"{open_text} {self._left_display_name}", 
-                    color="green"
-                )
-                self._left_gripper_open_button.on_click(lambda _: self._on_gripper_command(GripperType.LEFT, True))
-                
-                # Close button - Red
-                self._left_gripper_close_button = self.server.gui.add_button(
-                    f"{close_text} {self._left_display_name}", 
-                    color="red"
-                )
-                self._left_gripper_close_button.on_click(lambda _: self._on_gripper_command(GripperType.LEFT, False))
-                
-                # Right gripper buttons (for dual-arm mode)
-                # Open button - Green
-                self._right_gripper_open_button = self.server.gui.add_button(
-                    f"{open_text} {self._right_display_name}", 
-                    color="green"
-                )
-                self._right_gripper_open_button.on_click(lambda _: self._on_gripper_command(GripperType.RIGHT, True))
-                
-                # Close button - Red
-                self._right_gripper_close_button = self.server.gui.add_button(
-                    f"{close_text} {self._right_display_name}", 
-                    color="red"
-                )
-                self._right_gripper_close_button.on_click(lambda _: self._on_gripper_command(GripperType.RIGHT, False))
-                
-        except Exception as e:
-            logger.error(f"Failed to initialize Gripper panel GUI: {e}", exc_info=True)
-            raise
     
     
     def _on_gripper_command(self, gripper_type: GripperType, should_open: bool):
@@ -224,27 +246,21 @@ class GripperPanel:
             return
         
         try:
+            # Get the appropriate handler
             if gripper_type == GripperType.LEFT:
-                if self.ros2_interface.left_gripper_handler is None:
-                    logger.warning("Left gripper handler not available")
-                    return
-                
-                # Send command using target_command (recommended method)
-                target_value = 1 if should_open else 0
-                self.ros2_interface.left_gripper_handler.send_target_command(target_value)
-                
-                logger.info(f"Sent left gripper command: {'Open' if should_open else 'Close'}")
-                
-            elif gripper_type == GripperType.RIGHT:
-                if self.ros2_interface.right_gripper_handler is None:
-                    logger.warning("Right gripper handler not available")
-                    return
-                
-                # Send command using target_command (recommended method)
-                target_value = 1 if should_open else 0
-                self.ros2_interface.right_gripper_handler.send_target_command(target_value)
-                
-                logger.info(f"Sent right gripper command: {'Open' if should_open else 'Close'}")
+                handler = self.ros2_interface.left_gripper_handler
+                gripper_name = "left"
+            else:
+                handler = self.ros2_interface.right_gripper_handler
+                gripper_name = "right"
+            
+            if handler is None:
+                logger.warning(f"{gripper_name.capitalize()} gripper handler not available")
+                return
+            
+            # Send command using target_command (recommended method)
+            target_value = 1 if should_open else 0
+            handler.send_target_command(target_value)
                 
         except Exception as e:
             logger.error(f"Failed to send gripper command: {e}", exc_info=True)
@@ -283,6 +299,52 @@ class GripperPanel:
         
         return name if name else "Gripper"
     
+    def _update_gripper_state(self, gripper_type: GripperType):
+        """Update button visibility for a single gripper based on current state.
+        
+        Args:
+            gripper_type: LEFT or RIGHT gripper
+        """
+        if gripper_type == GripperType.LEFT:
+            handler = self.ros2_interface.left_gripper_handler
+            prev_state = self._prev_left_gripper_open
+            open_button = self._left_gripper_open_button
+            close_button = self._left_gripper_close_button
+            update_buttons = True  # Left gripper always updates
+        else:
+            handler = self.ros2_interface.right_gripper_handler
+            prev_state = self._prev_right_gripper_open
+            open_button = self._right_gripper_open_button
+            close_button = self._right_gripper_close_button
+            update_buttons = self._is_dual_arm  # Right gripper only updates in dual-arm mode
+        
+        if handler is None:
+            return
+        
+        is_open = handler.is_open
+        
+        # Update state
+        if gripper_type == GripperType.LEFT:
+            self._left_gripper_open = is_open
+        else:
+            self._right_gripper_open = is_open
+        
+        changed = is_open != prev_state or prev_state is None
+        
+        if changed:
+            # Update previous state
+            if gripper_type == GripperType.LEFT:
+                self._prev_left_gripper_open = is_open
+            else:
+                self._prev_right_gripper_open = is_open
+            
+            # Update button visibility
+            if update_buttons:
+                if open_button is not None:
+                    open_button.visible = not is_open  # Show Open if closed
+                if close_button is not None:
+                    close_button.visible = is_open  # Show Close if open
+    
     def update(self):
         """Update Gripper panel button visibility based on current state.
         
@@ -294,34 +356,12 @@ class GripperPanel:
             return
         
         try:
-            # Get state from gripper handlers (only check handlers that exist)
-            # Left gripper
-            if self.ros2_interface.left_gripper_handler is not None:
-                left_open = self.ros2_interface.left_gripper_handler.is_open
-                self._left_gripper_open = left_open
-                left_changed = left_open != self._prev_left_gripper_open or self._prev_left_gripper_open is None
-                
-                if left_changed:
-                    self._prev_left_gripper_open = left_open
-                    if self._left_gripper_open_button is not None:
-                        self._left_gripper_open_button.visible = not left_open  # Show Open if closed
-                    if self._left_gripper_close_button is not None:
-                        self._left_gripper_close_button.visible = left_open  # Show Close if open
+            # Update state for available grippers
+            if self._has_gripper(GripperType.LEFT):
+                self._update_gripper_state(GripperType.LEFT)
             
-            # Right gripper (only check if handler exists)
-            if self.ros2_interface.right_gripper_handler is not None:
-                right_open = self.ros2_interface.right_gripper_handler.is_open
-                self._right_gripper_open = right_open
-                right_changed = right_open != self._prev_right_gripper_open or self._prev_right_gripper_open is None
-                
-                if right_changed:
-                    self._prev_right_gripper_open = right_open
-                    # Only update buttons in dual-arm mode
-                    if self._is_dual_arm:
-                        if self._right_gripper_open_button is not None:
-                            self._right_gripper_open_button.visible = not right_open  # Show Open if closed
-                        if self._right_gripper_close_button is not None:
-                            self._right_gripper_close_button.visible = right_open  # Show Close if open
+            if self._has_gripper(GripperType.RIGHT):
+                self._update_gripper_state(GripperType.RIGHT)
                     
         except Exception as e:
             logger.warning(f"Failed to update Gripper panel: {e}")
@@ -336,54 +376,18 @@ class GripperPanel:
             return
         
         try:
-            # Update folder name and button labels
             if self._folder_handle is not None:
-                # Viser folders don't support renaming, so we need to recreate the folder
-                # But we'll keep the subscriptions intact
                 old_folder = self._folder_handle
-                
-                # Create new folder with new language
                 self._folder_handle = self.server.gui.add_folder(self.translator("ee_control"))
-                
-                # Move all GUI elements to new folder (recreate them)
                 with self._folder_handle:
-                    open_text = self.translator("open")
-                    close_text = self.translator("close")
+                    # Recreate buttons for available grippers
+                    has_left, has_right = self._get_gripper_handlers()
                     
-                    # Recreate left gripper buttons
-                    self._left_gripper_open_button = self.server.gui.add_button(
-                        f"{open_text} {self._left_display_name}",
-                        color="green"
-                    )
-                    self._left_gripper_open_button.on_click(
-                        lambda _: self._on_gripper_command(GripperType.LEFT, True)
-                    )
+                    if has_left:
+                        self._create_gripper_buttons(GripperType.LEFT, self._left_display_name)
                     
-                    self._left_gripper_close_button = self.server.gui.add_button(
-                        f"{close_text} {self._left_display_name}",
-                        color="red"
-                    )
-                    self._left_gripper_close_button.on_click(
-                        lambda _: self._on_gripper_command(GripperType.LEFT, False)
-                    )
-                    
-                    # Recreate right gripper buttons (if dual-arm)
-                    if self._is_dual_arm:
-                        self._right_gripper_open_button = self.server.gui.add_button(
-                            f"{open_text} {self._right_display_name}",
-                            color="green"
-                        )
-                        self._right_gripper_open_button.on_click(
-                            lambda _: self._on_gripper_command(GripperType.RIGHT, True)
-                        )
-                        
-                        self._right_gripper_close_button = self.server.gui.add_button(
-                            f"{close_text} {self._right_display_name}",
-                            color="red"
-                        )
-                        self._right_gripper_close_button.on_click(
-                            lambda _: self._on_gripper_command(GripperType.RIGHT, False)
-                        )
+                    if has_right and self._is_dual_arm:
+                        self._create_gripper_buttons(GripperType.RIGHT, self._right_display_name)
                 
                 # Remove old folder
                 try:
@@ -391,9 +395,9 @@ class GripperPanel:
                 except Exception as e:
                     logger.debug(f"Could not remove old folder: {e}")
                 
-                # Update UI to reflect current state
+                self._prev_left_gripper_open = None
+                self._prev_right_gripper_open = None
                 self.update()
-                
                 logger.debug("Gripper panel GUI labels updated")
         except Exception as e:
             logger.warning(f"Failed to update Gripper panel GUI labels: {e}")

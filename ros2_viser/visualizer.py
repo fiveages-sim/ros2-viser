@@ -6,19 +6,19 @@ import threading
 import time
 import warnings
 from io import StringIO
-from typing import Optional, Any
+from typing import Optional
 
 import numpy as np
 import viser
-from viser.extras import ViserUrdf
 import yourdfpy
+from viser.extras import ViserUrdf
 
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
-
 from .config import ROS2ViserConfig
-from .panels import FSMPanel, GripperPanel, JointPanel, HardwarePanel
-from .i18n import Translator, get_translator, set_global_language
 from .end_effector_marker import EndEffectorMarkerManager
+from .i18n import get_translator, set_global_language
+from .network_utils import get_local_ip, get_viser_server_port, display_server_info
+from .panels import FSMPanel, GripperPanel, JointPanel, HardwarePanel, ControllerPanel
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,7 @@ class ROS2ViserVisualizer:
         self._gripper_panel: Optional[GripperPanel] = None
         self._joint_panel: Optional[JointPanel] = None
         self._hardware_panel: Optional[HardwarePanel] = None
+        self._controller_panel: Optional[ControllerPanel] = None
         
         # Display control panel
         self._display_folder_handle: Optional[viser.GuiFolderHandle] = None
@@ -234,8 +235,6 @@ class ROS2ViserVisualizer:
                 logger.error(f"URDF data preview (first 500 chars): {urdf_string[:500]}")
             return
         
-        # Give server a moment to fully start
-        # This is safe because the update thread was already started in _init_viser()
         time.sleep(0.5)
     
     def _init_ros2_interface(self):
@@ -281,7 +280,7 @@ class ROS2ViserVisualizer:
                 if 'system' in node_name_lower:
                     has_system_node = True
                     detected_system_nodes.append(node['full_name'])
-                    logger.info(f"Hardware system node detected: {node['full_name']}")
+                    logger.debug(f"Hardware system node detected: {node['full_name']}")
                 
                 # Specifically check for m6_ccs_system
                 if 'm6_ccs_system' in node_name_lower:
@@ -290,7 +289,7 @@ class ROS2ViserVisualizer:
             
             # Initialize hardware panel if any system node is detected
             if has_system_node:
-                logger.info(f"Found {len(detected_system_nodes)} system node(s): {', '.join(detected_system_nodes)}")
+                logger.debug(f"Found {len(detected_system_nodes)} system node(s): {', '.join(detected_system_nodes)}")
                 
                 # Cleanup existing hardware panel if any
                 if self._hardware_panel is not None:
@@ -307,7 +306,7 @@ class ROS2ViserVisualizer:
                     has_m6_ccs_system=has_m6_ccs_system
                 )
                 self._hardware_panel.initialize()
-                logger.info("✅ Hardware panel initialized")
+                logger.debug("✅ Hardware panel initialized")
             else:
                 logger.debug("No system node detected (no node name contains 'system'), hardware panel not shown")
                 
@@ -380,6 +379,13 @@ class ROS2ViserVisualizer:
                 except Exception as e:
                     logger.warning(f"Error cleaning up Hardware panel during reinit: {e}")
                 self._hardware_panel = None
+            
+            if self._controller_panel is not None:
+                try:
+                    self._controller_panel.cleanup()
+                except Exception as e:
+                    logger.warning(f"Error cleaning up Controller panel during reinit: {e}")
+                self._controller_panel = None
             
             # Reinitialize panels if enabled
             if self.config.enable_fsm_panel:
@@ -457,6 +463,15 @@ class ROS2ViserVisualizer:
             # Recheck hardware nodes and reinitialize hardware panel if needed
             if self.ros2_interface is not None and self.ros2_interface.is_connected:
                 self._check_hardware_nodes()
+            
+            # Initialize controller panel if enabled
+            if self.config.enable_controller_panel if hasattr(self.config, 'enable_controller_panel') else True:
+                self._controller_panel = ControllerPanel(
+                    self.server,
+                    self.ros2_interface
+                )
+                self._controller_panel.initialize()
+                logger.info("✅ Controller panel reinitialized")
                 
         except Exception as e:
             logger.error(f"Failed to reinitialize panels: {e}", exc_info=True)
@@ -483,33 +498,17 @@ class ROS2ViserVisualizer:
             self._init_display_control_panel()
             
             # Update panel GUI labels (preserving subscriptions and state)
-            if self.config.enable_fsm_panel and self._fsm_panel is not None:
-                try:
-                    self._fsm_panel.update_gui_labels()
-                    logger.info("✅ FSM panel labels updated with new language")
-                except Exception as e:
-                    logger.warning(f"Failed to update FSM panel labels: {e}")
+            if self.config.enable_fsm_panel:
+                self._fsm_panel.update_gui_labels()
             
-            if self.config.enable_gripper_panel and self._gripper_panel is not None:
-                try:
-                    self._gripper_panel.update_gui_labels()
-                    logger.info("✅ Gripper panel labels updated with new language")
-                except Exception as e:
-                    logger.warning(f"Failed to update Gripper panel labels: {e}")
+            if self.config.enable_gripper_panel:
+                self._gripper_panel.update_gui_labels()
             
-            if self.config.enable_joint_panel and self._joint_panel is not None:
-                try:
-                    self._joint_panel.update_gui_labels()
-                    logger.info("✅ Joint panel labels updated with new language")
-                except Exception as e:
-                    logger.warning(f"Failed to update Joint panel labels: {e}")
+            if self.config.enable_joint_panel:
+                self._joint_panel.update_gui_labels()
             
-            if self._hardware_panel is not None:
-                try:
-                    self._hardware_panel.update_gui_labels()
-                    logger.info("✅ Hardware panel labels updated with new language")
-                except Exception as e:
-                    logger.warning(f"Failed to update Hardware panel labels: {e}")
+            self._hardware_panel.update_gui_labels()
+            self._controller_panel.update_gui_labels()
                 
         except Exception as e:
             logger.error(f"Failed to update panels with new language: {e}", exc_info=True)
@@ -678,6 +677,15 @@ class ROS2ViserVisualizer:
                     logger.error(f"Failed to create Viser server: {e}", exc_info=True)
                     raise
                 
+                # Get server port and display connection info
+                try:
+                    server_port = get_viser_server_port(self.server)
+                    local_ip, interface_name, is_wifi = get_local_ip()
+                    server_url = f"http://{local_ip}:{server_port}"
+                    display_server_info(server_url, local_ip, interface_name, is_wifi, server_port)
+                except Exception as e:
+                    logger.warning(f"⚠️ 无法显示服务器信息: {e}")
+                
                 # Add ground grid (only once)
                 logger.debug("Adding ground grid...")
                 self.server.scene.add_grid("/ground", width=2, height=2)
@@ -715,6 +723,16 @@ class ROS2ViserVisualizer:
                 # This is done after server is created and other panels are initialized
                 if self.ros2_interface is not None and self.ros2_interface.is_connected:
                     self._check_hardware_nodes()
+                
+                # Initialize controller panel
+                if self.ros2_interface is not None and self.ros2_interface.is_connected:
+                    if self.config.enable_controller_panel if hasattr(self.config, 'enable_controller_panel') else True:
+                        self._controller_panel = ControllerPanel(
+                            self.server,
+                            self.ros2_interface
+                        )
+                        self._controller_panel.initialize()
+                        logger.debug("✅ Controller panel initialized")
             
             # Create URDF visualization
             logger.debug(f"Creating ViserUrdf with {len(self.urdf_all_joint_names)} joints...")
@@ -733,9 +751,9 @@ class ROS2ViserVisualizer:
                     load_meshes=True,
                     load_collision_meshes=has_collision_scene, 
                 )
-                logger.info(f"✅ URDF visualization initialized at {self.config.root_node_name}")
+                logger.debug(f"✅ URDF visualization initialized at {self.config.root_node_name}")
                 if has_collision_scene:
-                    logger.info(f"✅ {self.translator('collision_meshes_loaded')}")
+                    logger.debug(f"✅ {self.translator('collision_meshes_loaded')}")
                 else:
                     logger.info(f"ℹ️  {self.translator('no_collision_meshes')}")
                 
@@ -891,8 +909,6 @@ class ROS2ViserVisualizer:
                 if (time.time() - start_time) >= max_wait_time:
                     break
             
-            # Poll robot_description from interface (non-blocking)
-            # The executor thread in ros2_interface is already running, so callbacks are being processed
             if self.ros2_interface is not None and self.ros2_interface.is_connected:
                 try:
                     robot_description = self.ros2_interface.get_robot_description()
@@ -952,6 +968,12 @@ class ROS2ViserVisualizer:
                 self._hardware_panel.cleanup()
             except Exception as e:
                 logger.warning(f"Error cleaning up Hardware panel: {e}")
+        
+        if self._controller_panel is not None:
+            try:
+                self._controller_panel.cleanup()
+            except Exception as e:
+                logger.warning(f"Error cleaning up Controller panel: {e}")
         
         # Wait for update thread first (it uses ros2_interface)
         if self._update_thread is not None:

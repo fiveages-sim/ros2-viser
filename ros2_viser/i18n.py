@@ -67,6 +67,14 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "m6_ccs_system_config_clicked": "M6 CCS 系统配置",
         "m6_ccs_configuration": "M6 CCS 配置",
         
+        # Controller Panel
+        "controller_control": "控制器配置",
+        "controllers_detected": "已检测到控制器",
+        "no_controllers_found": "未找到控制器",
+        "configure_controller": "配置控制器",
+        "configure": "配置",
+        "refresh_controllers": "刷新控制器列表",
+        
         # M6 CCS Parameter Names
         "param_ctrl_mode": "控制模式",
         "param_max_joint_speed": "最大关节速度",
@@ -79,6 +87,20 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "param_left_kine_param": "左末端运动学参数",
         "param_right_dyn_param": "右末端动力学参数",
         "param_right_kine_param": "右末端运动学参数",
+        
+        # Controller Parameter Names
+        "param_duration": "单次持续时间",
+        "param_interpolation_type": "插值类型",
+        "param_tanh_scale": "Tanh 缩放",
+        "param_position_threshold": "保持位置阈值",
+        "param_trajectory_duration": "轨迹持续时间",
+        "param_trajectory_blend_ratio": "轨迹混合比例",
+        
+        # Interpolation Type Options
+        "interpolation_tanh": "Tanh",
+        "interpolation_linear": "线性插值",
+        "interpolation_doubles": "DoubleS插值",
+        "interpolation_none": "不插值",
         
         # Control Mode Options
         "ctrl_mode_position": "位置控制",
@@ -149,15 +171,34 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "configuration_parameter": "Configuration Parameter",
         "enter_config_value": "Enter configuration value",
         "enable_feature": "Enable Feature",
+        
+        # Controller Parameter Names
+        "param_duration": "Duration",
+        "param_interpolation_type": "Interpolation Type",
+        "param_tanh_scale": "Tanh Scale",
+        "param_hold_position_threshold": "Hold Position Threshold",
+        "param_trajectory_duration": "Trajectory Duration",
+        "param_trajectory_blend_ratio": "Trajectory Blend Ratio",
+        
+        # Interpolation Type Options
+        "interpolation_tanh": "Tanh",
+        "interpolation_linear": "Linear",
+        "interpolation_doubles": "Doubles",
+        "interpolation_none": "None",
         "confirm": "Confirm",
         "cancel": "Cancel",
         "configuration_saved": "Configuration saved",
         "no_parameters_found": "No parameters found",
         "no_writable_parameters": "No writable parameters",
         "no_changes": "No changes",
-        "no_parameters_found": "No parameters found",
-        "no_writable_parameters": "No writable parameters",
-        "no_changes": "No changes",
+        
+        # Controller Panel
+        "controller_control": "Controller Config",
+        "controllers_detected": "Controllers detected",
+        "no_controllers_found": "No controllers found",
+        "configure_controller": "Configure Controller",
+        "configure": "Configure",
+        "refresh_controllers": "Refresh Controllers",
         
         # Messages
         "no_collision_meshes": "No collision meshes in URDF",

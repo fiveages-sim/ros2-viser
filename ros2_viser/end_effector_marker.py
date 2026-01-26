@@ -131,25 +131,16 @@ class EndEffectorMarkerManager:
     def cleanup(self):
         """Cleanup markers and frame nodes."""
         if self._left_ee_marker is not None:
-            try:
-                self._left_ee_marker.remove()
-            except Exception as e:
-                logger.debug(f"Error removing left EE marker: {e}")
+            self._left_ee_marker.remove()
             self._left_ee_marker = None
             self._last_left_ee_pose = None
         
         if self._ee_frame_node is not None:
-            try:
-                self._ee_frame_node.remove()
-            except Exception as e:
-                logger.debug(f"Error removing shared frame node: {e}")
+            self._ee_frame_node.remove()
             self._ee_frame_node = None
         
         if self._right_ee_marker is not None:
-            try:
-                self._right_ee_marker.remove()
-            except Exception as e:
-                logger.debug(f"Error removing right EE marker: {e}")
+            self._right_ee_marker.remove()
             self._right_ee_marker = None
             self._last_right_ee_pose = None
         
@@ -189,7 +180,7 @@ class EndEffectorMarkerManager:
         is_ocs2 = self._is_ocs2_mode()
         
         if is_ocs2 and self._last_fsm_mode is False:
-            logger.info("Entered OCS2 mode, resetting marker positions to current end-effector poses")
+            logger.debug("Entered OCS2 mode, resetting marker positions to current end-effector poses")
             self._reset_marker_positions()
         
         self._last_fsm_mode = is_ocs2
@@ -339,46 +330,15 @@ class EndEffectorMarkerManager:
         self._is_sending = True
         try:
             if has_left and has_right:
-                try:
-                    from geometry_msgs.msg import Pose
-                    
-                    left_position, left_wxyz = pending_left
-                    left_pose = Pose()
-                    left_pose.position.x = left_position[0]
-                    left_pose.position.y = left_position[1]
-                    left_pose.position.z = left_position[2]
-                    left_pose.orientation.w = left_wxyz[0]
-                    left_pose.orientation.x = left_wxyz[1]
-                    left_pose.orientation.y = left_wxyz[2]
-                    left_pose.orientation.z = left_wxyz[3]
-                    
-                    right_position, right_wxyz = pending_right
-                    right_pose = Pose()
-                    right_pose.position.x = right_position[0]
-                    right_pose.position.y = right_position[1]
-                    right_pose.position.z = right_position[2]
-                    right_pose.orientation.w = right_wxyz[0]
-                    right_pose.orientation.x = right_wxyz[1]
-                    right_pose.orientation.y = right_wxyz[2]
-                    right_pose.orientation.z = right_wxyz[3]
-                    
-                    left_frame_id = self._left_frame_id or self.ros2_interface.left_arm_handler.get_frame_id()
-                    right_frame_id = self._right_frame_id or self.ros2_interface.right_arm_handler.get_frame_id()
-                    common_frame_id = left_frame_id or (self._marker_base_frame if self._marker_base_frame is not None else "base_link")
-                    
-                    if left_frame_id != right_frame_id:
-                        logger.debug(f"Left and right arms have different frame_ids ({left_frame_id} vs {right_frame_id}), using left arm's frame_id: {common_frame_id}")
-                    
-                    self.ros2_interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id=common_frame_id)
-                    logger.info(f"Sent dual arm target poses (single-shot mode, frame: {common_frame_id}, no transformation)")
-                except Exception as e:
-                    logger.error(f"Failed to send dual arm target poses: {e}", exc_info=True)
+                left_pose = self._create_pose_from_tuple(pending_left)
+                right_pose = self._create_pose_from_tuple(pending_right)
+                self.ros2_interface.send_dual_arm_target_stamped(left_pose, right_pose, frame_id=self._left_frame_id)
             elif has_left:
-                self._send_pose_command_stamped("left", pending_left)
+                self._send_pose_command("left", pending_left)
             elif has_right:
-                self._send_pose_command_stamped("right", pending_right)
+                self._send_pose_command("right", pending_right)
             else:
-                logger.warning("No pending poses to send")
+                logger.debug("No pending poses to send")
         finally:
             # Always clear the sending flag, even if an exception occurred
             self._is_sending = False
@@ -392,6 +352,76 @@ class EndEffectorMarkerManager:
         self.urdf = urdf
     
     # Private methods
+    
+    def _get_arm_handler(self, arm: str):
+        """Get the arm handler for the specified arm."""
+        if self.ros2_interface is None:
+            return None
+        return (self.ros2_interface.left_arm_handler if arm == "left" 
+                else self.ros2_interface.right_arm_handler if arm == "right" else None)
+    
+    def _extract_pose_data(self, pose) -> Tuple:
+        """Extract position and wxyz from a Pose object.
+        
+        Args:
+            pose: geometry_msgs.msg.Pose object
+            
+        Returns:
+            Tuple of (position, wxyz) where position is (x, y, z) and wxyz is (w, x, y, z)
+        """
+        position = (
+            float(pose.position.x),
+            float(pose.position.y),
+            float(pose.position.z)
+        )
+        wxyz = (
+            float(pose.orientation.w),
+            float(pose.orientation.x),
+            float(pose.orientation.y),
+            float(pose.orientation.z)
+        )
+        return (position, wxyz)
+    
+    def _create_pose_from_tuple(self, pose_tuple: Tuple):
+        """Create a geometry_msgs.msg.Pose from a (position, wxyz) tuple.
+        
+        Args:
+            pose_tuple: (position, wxyz) tuple where position is (x, y, z) and wxyz is (w, x, y, z)
+            
+        Returns:
+            geometry_msgs.msg.Pose object
+        """
+        from geometry_msgs.msg import Pose
+        pose = Pose()
+        position, wxyz = pose_tuple
+        pose.position.x = position[0]
+        pose.position.y = position[1]
+        pose.position.z = position[2]
+        pose.orientation.w = wxyz[0]
+        pose.orientation.x = wxyz[1]
+        pose.orientation.y = wxyz[2]
+        pose.orientation.z = wxyz[3]
+        return pose
+    
+    def _copy_pose(self, source_pose):
+        """Create a copy of a Pose object.
+        
+        Args:
+            source_pose: geometry_msgs.msg.Pose object
+            
+        Returns:
+            New Pose object with copied values
+        """
+        from geometry_msgs.msg import Pose
+        pose = Pose()
+        pose.position.x = source_pose.position.x
+        pose.position.y = source_pose.position.y
+        pose.position.z = source_pose.position.z
+        pose.orientation.x = source_pose.orientation.x
+        pose.orientation.y = source_pose.orientation.y
+        pose.orientation.z = source_pose.orientation.z
+        pose.orientation.w = source_pose.orientation.w
+        return pose
     
     def _get_link_frame_path(self, link_name: str, prefer_collision: bool = False) -> Optional[str]:
         """Get the viser scene path for a URDF link.
@@ -547,15 +577,7 @@ class EndEffectorMarkerManager:
         if self.server is None or self.ros2_interface is None:
             return
         
-        handler = None
-        if arm == "left":
-            handler = self.ros2_interface.left_arm_handler
-        elif arm == "right":
-            handler = self.ros2_interface.right_arm_handler
-        else:
-            logger.warning(f"Unknown arm: {arm}")
-            return
-        
+        handler = self._get_arm_handler(arm)
         if handler is None:
             logger.warning(f"{arm} arm handler is None, cannot create marker")
             return
@@ -567,7 +589,7 @@ class EndEffectorMarkerManager:
         
         if arm == "left" and self._marker_base_frame is None:
             self._marker_base_frame = frame_id
-            logger.info(f"Set marker base_frame to '{frame_id}' from left arm handler")
+            logger.debug(f"Set marker base_frame to '{frame_id}' from left arm handler")
         
         link_frame_path = self._get_link_frame_path(frame_id)
         is_urdf_link = link_frame_path is not None
@@ -584,7 +606,7 @@ class EndEffectorMarkerManager:
         
         if is_urdf_link and link_frame_path is not None:
             marker_name = f"{link_frame_path}/ee_target_{arm}"
-            logger.info(f"Frame '{frame_id}' is a URDF link, binding marker to shared URDF frame '{link_frame_path}' for {arm} arm")
+            logger.debug(f"Frame '{frame_id}' is a URDF link, binding marker to shared URDF frame '{link_frame_path}' for {arm} arm")
         else:
             frame_node_name = f"/frames/{arm}_arm_frame"
             marker_name = f"{frame_node_name}/ee_target"
@@ -611,90 +633,107 @@ class EndEffectorMarkerManager:
             position = (0.5, 0.0, 0.5)
             wxyz = (1.0, 0.0, 0.0, 0.0)
         else:
-            position = (
-                float(current_pose.position.x),
-                float(current_pose.position.y),
-                float(current_pose.position.z)
-            )
-            wxyz = (
-                float(current_pose.orientation.w),
-                float(current_pose.orientation.x),
-                float(current_pose.orientation.y),
-                float(current_pose.orientation.z)
-            )
+            position, wxyz = self._extract_pose_data(current_pose)
         
         try:
             logger.debug(f"Creating {arm} arm marker at path '{marker_name}' with position {position}, wxyz {wxyz}")
+            marker = self.server.scene.add_transform_controls(
+                marker_name,
+                scale=self.config.marker_scale,
+                position=position,
+                wxyz=wxyz
+            )
+            marker.visible = False
+            pose = (position, wxyz)
             if arm == "left":
-                self._left_ee_marker = self.server.scene.add_transform_controls(
-                    marker_name,
-                    scale=self.config.marker_scale,
-                    position=position,
-                    wxyz=wxyz
-                )
-                self._left_ee_marker.visible = False
-                self._last_left_ee_pose = (position, wxyz)
-                logger.info(f"✅ Created left arm end-effector marker at {position} (in frame: {frame_id}, path: {marker_name}, initially hidden)")
+                self._left_ee_marker = marker
+                self._last_left_ee_pose = pose
             else:
-                self._right_ee_marker = self.server.scene.add_transform_controls(
-                    marker_name,
-                    scale=self.config.marker_scale,
-                    position=position,
-                    wxyz=wxyz
-                )
-                self._right_ee_marker.visible = False
-                self._last_right_ee_pose = (position, wxyz)
-                logger.info(f"✅ Created right arm end-effector marker at {position} (in frame: {frame_id}, path: {marker_name}, initially hidden)")
+                self._right_ee_marker = marker
+                self._last_right_ee_pose = pose
+            logger.debug(f"✅ Created {arm} arm end-effector marker at {position} (in frame: {frame_id}, path: {marker_name}, initially hidden)")
         except Exception as e:
             logger.error(f"Failed to create {arm} arm marker at path '{marker_name}': {e}", exc_info=True)
             if arm == "left":
                 self._left_ee_marker = None
+                self._last_left_ee_pose = None
             else:
                 self._right_ee_marker = None
+                self._last_right_ee_pose = None
     
     def _is_ocs2_mode(self) -> bool:
         """Check if robot is in OCS2 mode (FSM command == 3)."""
         if self.ros2_interface is None or not self.ros2_interface.is_connected:
             return False
         
-        try:
-            fsm_command = self.ros2_interface.get_fsm_command()
-            return fsm_command == 3
-        except Exception as e:
-            logger.debug(f"Could not get FSM command: {e}")
-            try:
-                fsm_state = self.ros2_interface.get_fsm_state()
-                return fsm_state == "OCS2"
-            except Exception:
-                return False
+        fsm_command = self.ros2_interface.get_fsm_command()
+        return fsm_command == 3
     
     def _update_marker_visibility(self, is_ocs2: bool):
         """Update marker visibility based on FSM state."""
         if self._left_ee_marker is not None:
-            try:
-                self._left_ee_marker.visible = is_ocs2
-            except Exception as e:
-                logger.debug(f"Could not set left marker visibility: {e}")
-        
+            self._left_ee_marker.visible = is_ocs2
         if self._right_ee_marker is not None:
-            try:
-                self._right_ee_marker.visible = is_ocs2
-            except Exception as e:
-                logger.debug(f"Could not set right marker visibility: {e}")
+            self._right_ee_marker.visible = is_ocs2
     
     def _update_gui_visibility(self, is_ocs2: bool):
         """Update GUI control visibility based on FSM state and publish mode."""
         if self._marker_publish_mode_dropdown is not None:
-            try:
-                self._marker_publish_mode_dropdown.visible = is_ocs2
-            except Exception as e:
-                logger.debug(f"Could not set marker publish mode dropdown visibility: {e}")
+            self._marker_publish_mode_dropdown.visible = is_ocs2
         
         if self._send_marker_pose_button is not None:
-            try:
-                self._send_marker_pose_button.visible = is_ocs2 and not self._marker_continuous_publish
-            except Exception as e:
-                logger.debug(f"Could not set send marker pose button visibility: {e}")
+            self._send_marker_pose_button.visible = is_ocs2 and not self._marker_continuous_publish
+    
+    def _update_single_marker_from_target_pose(self, arm: str) -> bool:
+        """Update a single marker position from current target pose if it has changed.
+        
+        Args:
+            arm: "left" or "right"
+            
+        Returns:
+            True if marker was updated, False otherwise.
+        """
+        marker = self._left_ee_marker if arm == "left" else self._right_ee_marker
+        handler = self._get_arm_handler(arm)
+        frame_id = self._left_frame_id if arm == "left" else self._right_frame_id
+        
+        if marker is None or handler is None or frame_id is None:
+            return False
+        
+        target_pose = handler.get_target_pose()
+        last_target_pose = self._last_left_target_pose if arm == "left" else self._last_right_target_pose
+        
+        if target_pose is None:
+            if last_target_pose is not None:
+                if arm == "left":
+                    self._last_left_target_pose = None
+                else:
+                    self._last_right_target_pose = None
+            return False
+        
+        target_changed = (
+            last_target_pose is None or
+            last_target_pose.position.x != target_pose.position.x or
+            last_target_pose.position.y != target_pose.position.y or
+            last_target_pose.position.z != target_pose.position.z or
+            last_target_pose.orientation.x != target_pose.orientation.x or
+            last_target_pose.orientation.y != target_pose.orientation.y or
+            last_target_pose.orientation.z != target_pose.orientation.z or
+            last_target_pose.orientation.w != target_pose.orientation.w
+        )
+        
+        if target_changed:
+            position, wxyz = self._extract_pose_data(target_pose)
+            marker.position = position
+            marker.wxyz = wxyz
+            if arm == "left":
+                self._last_left_target_pose = self._copy_pose(target_pose)
+            else:
+                self._last_right_target_pose = self._copy_pose(target_pose)
+            logger.debug(f"Updated {arm} marker position from target pose: {position}")
+            return True
+        
+        return False
     
     def _update_markers_from_target_poses(self) -> bool:
         """Update marker positions from current target poses if they have changed.
@@ -705,172 +744,56 @@ class EndEffectorMarkerManager:
         if self.ros2_interface is None or not self.ros2_interface.is_connected:
             return False
         
-        marker_updated = False
-        
         current_time = time.time()
         time_since_last_update = current_time - self._last_marker_update_time
         if time_since_last_update < self._marker_update_cooldown:
             return False
-        if self._left_ee_marker is not None and self.ros2_interface.left_arm_handler is not None:
-            try:
-                target_pose = self.ros2_interface.left_arm_handler.get_target_pose()
-                if target_pose is not None:
-                    target_changed = (
-                        self._last_left_target_pose is None or
-                        self._last_left_target_pose.position.x != target_pose.position.x or
-                        self._last_left_target_pose.position.y != target_pose.position.y or
-                        self._last_left_target_pose.position.z != target_pose.position.z or
-                        self._last_left_target_pose.orientation.x != target_pose.orientation.x or
-                        self._last_left_target_pose.orientation.y != target_pose.orientation.y or
-                        self._last_left_target_pose.orientation.z != target_pose.orientation.z or
-                        self._last_left_target_pose.orientation.w != target_pose.orientation.w
-                    )
-                    
-                    if target_changed:
-                        if self._left_frame_id is not None:
-                            position = (
-                                float(target_pose.position.x),
-                                float(target_pose.position.y),
-                                float(target_pose.position.z)
-                            )
-                            wxyz = (
-                                float(target_pose.orientation.w),
-                                float(target_pose.orientation.x),
-                                float(target_pose.orientation.y),
-                                float(target_pose.orientation.z)
-                            )
-                            
-                            self._left_ee_marker.position = position
-                            self._left_ee_marker.wxyz = wxyz
-                            marker_updated = True
-                            from geometry_msgs.msg import Pose
-                            self._last_left_target_pose = Pose()
-                            self._last_left_target_pose.position.x = target_pose.position.x
-                            self._last_left_target_pose.position.y = target_pose.position.y
-                            self._last_left_target_pose.position.z = target_pose.position.z
-                            self._last_left_target_pose.orientation.x = target_pose.orientation.x
-                            self._last_left_target_pose.orientation.y = target_pose.orientation.y
-                            self._last_left_target_pose.orientation.z = target_pose.orientation.z
-                            self._last_left_target_pose.orientation.w = target_pose.orientation.w
-                            logger.debug(f"Updated left marker position from target pose: {position}")
-                elif self._last_left_target_pose is not None:
-                    self._last_left_target_pose = None
-            except Exception as e:
-                logger.debug(f"Error updating left marker from target pose: {e}")
         
-        # Update right arm marker from target pose
-        if self._right_ee_marker is not None and self.ros2_interface.right_arm_handler is not None:
-            try:
-                target_pose = self.ros2_interface.right_arm_handler.get_target_pose()
-                if target_pose is not None:
-                    target_changed = (
-                        self._last_right_target_pose is None or
-                        self._last_right_target_pose.position.x != target_pose.position.x or
-                        self._last_right_target_pose.position.y != target_pose.position.y or
-                        self._last_right_target_pose.position.z != target_pose.position.z or
-                        self._last_right_target_pose.orientation.x != target_pose.orientation.x or
-                        self._last_right_target_pose.orientation.y != target_pose.orientation.y or
-                        self._last_right_target_pose.orientation.z != target_pose.orientation.z or
-                        self._last_right_target_pose.orientation.w != target_pose.orientation.w
-                    )
-                    
-                    if target_changed:
-                        if self._right_frame_id is not None:
-                            position = (
-                                float(target_pose.position.x),
-                                float(target_pose.position.y),
-                                float(target_pose.position.z)
-                            )
-                            wxyz = (
-                                float(target_pose.orientation.w),
-                                float(target_pose.orientation.x),
-                                float(target_pose.orientation.y),
-                                float(target_pose.orientation.z)
-                            )
-                            
-                            self._right_ee_marker.position = position
-                            self._right_ee_marker.wxyz = wxyz
-                            marker_updated = True
-                            from geometry_msgs.msg import Pose
-                            self._last_right_target_pose = Pose()
-                            self._last_right_target_pose.position.x = target_pose.position.x
-                            self._last_right_target_pose.position.y = target_pose.position.y
-                            self._last_right_target_pose.position.z = target_pose.position.z
-                            self._last_right_target_pose.orientation.x = target_pose.orientation.x
-                            self._last_right_target_pose.orientation.y = target_pose.orientation.y
-                            self._last_right_target_pose.orientation.z = target_pose.orientation.z
-                            self._last_right_target_pose.orientation.w = target_pose.orientation.w
-                            logger.debug(f"Updated right marker position from target pose: {position}")
-                elif self._last_right_target_pose is not None:
-                    self._last_right_target_pose = None
-            except Exception as e:
-                logger.debug(f"Error updating right marker from target pose: {e}")
+        left_updated = self._update_single_marker_from_target_pose("left")
+        right_updated = self._update_single_marker_from_target_pose("right")
         
-        return marker_updated
+        return left_updated or right_updated
+    
+    def _reset_single_marker_position(self, arm: str):
+        """Reset a single marker position to current end-effector pose.
+        
+        Args:
+            arm: "left" or "right"
+        """
+        marker = self._left_ee_marker if arm == "left" else self._right_ee_marker
+        handler = self._get_arm_handler(arm)
+        frame_id = self._left_frame_id if arm == "left" else self._right_frame_id
+        
+        if marker is None or handler is None or frame_id is None:
+            return
+        
+        current_pose = handler.get_pose()
+        if current_pose is None:
+            current_pose = handler.get_target_pose()
+        
+        if current_pose is not None:
+            position, wxyz = self._extract_pose_data(current_pose)
+            marker.position = position
+            marker.wxyz = wxyz
+            pose = (position, wxyz)
+            if arm == "left":
+                self._last_left_ee_pose = pose
+            else:
+                self._last_right_ee_pose = pose
+            logger.debug(f"Reset {arm} arm marker position to {position} (in frame: {frame_id})")
+        else:
+            logger.warning(f"Could not get current pose for {arm} arm, cannot reset marker")
     
     def _reset_marker_positions(self):
         """Reset marker positions to current end-effector poses when entering OCS2 mode."""
         if self.ros2_interface is None or not self.ros2_interface.is_connected:
             return
         
-        if self._left_ee_marker is not None and self.ros2_interface.left_arm_handler is not None:
-            try:
-                current_pose = self.ros2_interface.left_arm_handler.get_pose()
-                if current_pose is None:
-                    current_pose = self.ros2_interface.left_arm_handler.get_target_pose()
-                
-                if current_pose is not None and self._left_frame_id is not None:
-                    position = (
-                        float(current_pose.position.x),
-                        float(current_pose.position.y),
-                        float(current_pose.position.z)
-                    )
-                    wxyz = (
-                        float(current_pose.orientation.w),
-                        float(current_pose.orientation.x),
-                        float(current_pose.orientation.y),
-                        float(current_pose.orientation.z)
-                    )
-                    
-                    self._left_ee_marker.position = position
-                    self._left_ee_marker.wxyz = wxyz
-                    self._last_left_ee_pose = (position, wxyz)
-                    logger.info(f"Reset left arm marker position to {position} (in frame: {self._left_frame_id})")
-                else:
-                    logger.warning("Could not get current pose for left arm, cannot reset marker")
-            except Exception as e:
-                logger.warning(f"Failed to reset left arm marker position: {e}")
-        
-        if self._right_ee_marker is not None and self.ros2_interface.right_arm_handler is not None:
-            try:
-                current_pose = self.ros2_interface.right_arm_handler.get_pose()
-                if current_pose is None:
-                    current_pose = self.ros2_interface.right_arm_handler.get_target_pose()
-                
-                if current_pose is not None and self._right_frame_id is not None:
-                    position = (
-                        float(current_pose.position.x),
-                        float(current_pose.position.y),
-                        float(current_pose.position.z)
-                    )
-                    wxyz = (
-                        float(current_pose.orientation.w),
-                        float(current_pose.orientation.x),
-                        float(current_pose.orientation.y),
-                        float(current_pose.orientation.z)
-                    )
-                    
-                    self._right_ee_marker.position = position
-                    self._right_ee_marker.wxyz = wxyz
-                    self._last_right_ee_pose = (position, wxyz)
-                    logger.info(f"Reset right arm marker position to {position} (in frame: {self._right_frame_id})")
-                else:
-                    logger.warning("Could not get current pose for right arm, cannot reset marker")
-            except Exception as e:
-                logger.warning(f"Failed to reset right arm marker position: {e}")
+        self._reset_single_marker_position("left")
+        self._reset_single_marker_position("right")
     
     def _send_pose_command(self, arm: str, pose_tuple: Tuple):
-        """Send pose command for the specified arm (continuous mode).
+        """Send pose command for the specified arm.
         
         Args:
             arm: "left" or "right"
@@ -880,59 +803,14 @@ class EndEffectorMarkerManager:
             return
         
         try:
-            from geometry_msgs.msg import Pose
-            pose = Pose()
-            position, wxyz = pose_tuple
-            pose.position.x = position[0]
-            pose.position.y = position[1]
-            pose.position.z = position[2]
-            pose.orientation.w = wxyz[0]
-            pose.orientation.x = wxyz[1]
-            pose.orientation.y = wxyz[2]
-            pose.orientation.z = wxyz[3]
-            
-            if arm == "left":
-                handler = self.ros2_interface.left_arm_handler
-            else:
-                handler = self.ros2_interface.right_arm_handler
+            pose = self._create_pose_from_tuple(pose_tuple)
+            handler = self._get_arm_handler(arm)
+            if handler is None:
+                logger.warning(f"{arm} arm handler not available")
+                return
             
             frame_id = self._marker_base_frame or self._left_frame_id or "base_link"
-            
             handler.send_target_stamped(frame_id, pose)
-            logger.debug(f"Sent {arm} arm target pose (continuous mode, frame: {frame_id}, no transformation)")
         except Exception as e:
             logger.warning(f"Failed to send {arm} arm pose command: {e}")
     
-    def _send_pose_command_stamped(self, arm: str, pose_tuple: Tuple):
-        """Send pose command using send_target_stamped (single-shot mode).
-        
-        Args:
-            arm: "left" or "right"
-            pose_tuple: (position, wxyz) tuple
-        """
-        if self.ros2_interface is None or not self.ros2_interface.is_connected:
-            return
-        
-        try:
-            from geometry_msgs.msg import Pose
-            pose = Pose()
-            position, wxyz = pose_tuple
-            pose.position.x = position[0]
-            pose.position.y = position[1]
-            pose.position.z = position[2]
-            pose.orientation.w = wxyz[0]
-            pose.orientation.x = wxyz[1]
-            pose.orientation.y = wxyz[2]
-            pose.orientation.z = wxyz[3]
-            
-            if arm == "left":
-                handler = self.ros2_interface.left_arm_handler
-            else:
-                handler = self.ros2_interface.right_arm_handler
-            
-            frame_id = self._marker_base_frame or self._left_frame_id or "base_link"
-            
-            handler.send_target_stamped(frame_id, pose)
-            logger.info(f"Sent {arm} arm target pose (single-shot mode, frame: {frame_id}, no transformation)")
-        except Exception as e:
-            logger.warning(f"Failed to send {arm} arm pose command (stamped): {e}")

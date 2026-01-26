@@ -33,6 +33,7 @@ dependencies = [
     "rclpy",
     "std-msgs",
     "numpy",
+    "qrcode[pil]",
 ]
 
 [project.urls]

@@ -87,7 +87,7 @@ class FSMPanel:
             self.update()
             
             self._initialized = True
-            logger.info("✅ FSM control panel initialized")
+            logger.debug("✅ FSM control panel initialized")
             
         except Exception as e:
             logger.error(f"Failed to initialize FSM panel: {e}", exc_info=True)
@@ -256,69 +256,55 @@ class FSMPanel:
         This method only updates the text/labels of GUI elements, preserving
         all ROS2 subscriptions and state.
         """
-        if not self._initialized or self.server is None:
-            return
-        
-        try:
-            # Update folder name
-            if self._folder_handle is not None:
-                # Viser folders don't support renaming, so we need to recreate the folder
-                # But we'll keep the subscriptions intact
-                old_folder = self._folder_handle
+        if self._folder_handle is not None:
+            old_folder = self._folder_handle
+            self._folder_handle = self.server.gui.add_folder(self.translator("fsm_control"))
+            with self._folder_handle:
+                self._fsm_state_label = self.server.gui.add_text(
+                    self.translator("current_state"),
+                    initial_value=self._current_fsm_state,
+                    disabled=True
+                )
                 
-                # Create new folder with new language
-                self._folder_handle = self.server.gui.add_folder(self.translator("fsm_control"))
+                # Recreate buttons
+                self._fsm_button_handles["to_home"] = self.server.gui.add_button("HOME", color=(128, 0, 128))
+                self._fsm_button_handles["to_home"].on_click(
+                    lambda _: self._send_fsm_command(1, "HOME")
+                )
                 
-                # Move all GUI elements to new folder (recreate them)
-                with self._folder_handle:
-                    # Recreate state label
-                    self._fsm_state_label = self.server.gui.add_text(
-                        self.translator("current_state"),
-                        initial_value=self._current_fsm_state,
-                        disabled=True
-                    )
-                    
-                    # Recreate buttons
-                    self._fsm_button_handles["to_home"] = self.server.gui.add_button("HOME", color=(128, 0, 128))
-                    self._fsm_button_handles["to_home"].on_click(
-                        lambda _: self._send_fsm_command(1, "HOME")
-                    )
-                    
-                    self._fsm_button_handles["to_hold"] = self.server.gui.add_button("HOLD", color="yellow")
-                    self._fsm_button_handles["to_hold"].on_click(
-                        lambda _: self._send_fsm_command(2, "HOLD")
-                    )
-                    
-                    self._fsm_button_handles["to_ocs2"] = self.server.gui.add_button("OCS2", color="blue")
-                    self._fsm_button_handles["to_ocs2"].on_click(
-                        lambda _: self._send_fsm_command(3, "OCS2")
-                    )
-                    
-                    self._fsm_button_handles["to_movej"] = self.server.gui.add_button("MOVEJ", color="cyan")
-                    self._fsm_button_handles["to_movej"].on_click(
-                        lambda _: self._send_fsm_command(4, "MOVEJ")
-                    )
-                    
-                    # Recreate switch pose button
-                    switch_pose_text = self.translator("switch_pose")
-                    self._fsm_switch_pose_button = self.server.gui.add_button(
-                        f"{switch_pose_text} (Home ↔ Rest)",
-                        color=(255, 100, 0)
-                    )
-                    self._fsm_switch_pose_button.on_click(self._on_switch_pose_clicked)
+                self._fsm_button_handles["to_hold"] = self.server.gui.add_button("HOLD", color="yellow")
+                self._fsm_button_handles["to_hold"].on_click(
+                    lambda _: self._send_fsm_command(2, "HOLD")
+                )
                 
-                # Remove old folder
-                try:
-                    old_folder.remove()
-                except Exception as e:
-                    logger.debug(f"Could not remove old folder: {e}")
+                self._fsm_button_handles["to_ocs2"] = self.server.gui.add_button("OCS2", color="blue")
+                self._fsm_button_handles["to_ocs2"].on_click(
+                    lambda _: self._send_fsm_command(3, "OCS2")
+                )
                 
-                # Update UI to reflect current state
-                self.update()
+                self._fsm_button_handles["to_movej"] = self.server.gui.add_button("MOVEJ", color="cyan")
+                self._fsm_button_handles["to_movej"].on_click(
+                    lambda _: self._send_fsm_command(4, "MOVEJ")
+                )
                 
-                logger.debug("FSM panel GUI labels updated")
-        except Exception as e:
-            logger.warning(f"Failed to update FSM panel GUI labels: {e}")
+                # Recreate switch pose button
+                switch_pose_text = self.translator("switch_pose")
+                self._fsm_switch_pose_button = self.server.gui.add_button(
+                    f"{switch_pose_text} (Home ↔ Rest)",
+                    color=(255, 100, 0)
+                )
+                self._fsm_switch_pose_button.on_click(self._on_switch_pose_clicked)
+            
+            # Remove old folder
+            try:
+                old_folder.remove()
+            except Exception as e:
+                logger.debug(f"Could not remove old folder: {e}")
+            
+            self._current_fsm_state = "INVALID"
+            self.update()
+            
+            logger.debug("FSM panel GUI labels updated")
     
     def cleanup(self):
         """Cleanup resources (subscriptions, GUI elements, etc.)."""

@@ -74,7 +74,7 @@ class HardwarePanel:
             self._init_gui()
             
             self._initialized = True
-            logger.info("✅ Hardware control panel initialized")
+            logger.debug("✅ Hardware control panel initialized")
             
         except Exception as e:
             logger.error(f"Failed to initialize Hardware panel: {e}", exc_info=True)
