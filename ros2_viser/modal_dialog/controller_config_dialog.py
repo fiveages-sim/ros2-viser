@@ -101,7 +101,6 @@ class ControllerConfigDialog(BaseModalDialog):
         """Build controller configuration dialog content."""
         try:
             # Query all parameters from the controller node
-            logger.info(f"Querying parameters from controller node: {self.controller_node_name}")
             params = self.ros2_interface.list_node_parameters(self.controller_node_name)
             
             if not params:
@@ -112,8 +111,6 @@ class ControllerConfigDialog(BaseModalDialog):
                 )
                 logger.warning(f"No parameters found for controller node {self.controller_node_name}")
                 return
-            
-            logger.info(f"Found {len(params)} parameters for {self.controller_node_name}")
             
             # Store original values and metadata
             for param in params:
@@ -340,7 +337,6 @@ class ControllerConfigDialog(BaseModalDialog):
                     else:
                         logger.warning(f"Input handle for {param_name} has no visible or disabled attribute")
             
-            logger.info(f"Updated {updated_count} tanh_scale parameter(s) visibility for prefix '{prefix}' based on interpolation_type: {interpolation_type}")
         except Exception as e:
             logger.error(f"Failed to update tanh_scale visibility: {e}", exc_info=True)
     
@@ -458,14 +454,13 @@ class ControllerConfigDialog(BaseModalDialog):
                 return
             
             # Set changed parameters via ROS2 interface
-            logger.info(f"Setting {len(changed_params)} changed parameters")
             success = self.ros2_interface.set_node_parameters(
                 self.controller_node_name,
                 changed_params
             )
             
             if success:
-                logger.info(f"Successfully set {len(changed_params)} parameters")
+                pass
             else:
                 logger.warning(f"Failed to set some parameters")
             

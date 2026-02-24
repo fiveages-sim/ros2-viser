@@ -73,7 +73,6 @@ class BaseModalDialog(ABC):
                 )
                 cancel_btn.on_click(lambda _: self._handle_cancel())
             
-            logger.info(f"Modal dialog '{self.title}' opened")
         except Exception as e:
             logger.error(f"Failed to show dialog '{self.title}': {e}", exc_info=True)
             self.close()

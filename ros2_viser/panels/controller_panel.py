@@ -221,8 +221,6 @@ class ControllerPanel:
             controller_name = controller['name']
             controller_node_name = controller['full_name']
             
-            logger.info(f"Controller configuration button clicked for: {controller_name}")
-            
             # Close existing dialog if any
             if controller_name in self._dialogs and self._dialogs[controller_name].is_open:
                 self._dialogs[controller_name].close()
@@ -253,11 +251,7 @@ class ControllerPanel:
             return
         
         try:
-            logger.info(f"Controller '{controller_name}' configuration confirmed")
-            
             if changed_params:
-                logger.info(f"Changed {len(changed_params)} parameters: {list(changed_params.keys())}")
-                
                 # Update status text
                 if self._status_text is not None:
                     param_names = ', '.join(list(changed_params.keys())[:3])
