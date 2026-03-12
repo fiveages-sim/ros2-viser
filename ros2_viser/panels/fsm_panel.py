@@ -58,6 +58,7 @@ class FSMPanel:
         self._fsm_state_label: Optional[viser.GuiTextHandle] = None
         self._fsm_button_handles: dict[str, viser.GuiButtonHandle] = {}
         self._fsm_switch_pose_button: Optional[viser.GuiButtonHandle] = None
+        self._home_confirm_modal: Optional[viser.GuiModalHandle] = None
         # End-effector marker controls (only visible in OCS2 mode)
         self._marker_publish_mode_dropdown: Optional[viser.GuiDropdownHandle] = None
         self._send_marker_pose_button: Optional[viser.GuiButtonHandle] = None
@@ -113,7 +114,7 @@ class FSMPanel:
                 # HOME button - Purple
                 self._fsm_button_handles["to_home"] = self.server.gui.add_button("HOME", color=(128, 0, 128))
                 self._fsm_button_handles["to_home"].on_click(
-                    lambda _: self._send_fsm_command(1, "HOME")
+                    self._on_home_clicked
                 )
                 
                 # HOLD button - Yellow
@@ -179,6 +180,48 @@ class FSMPanel:
         # Wait 0.1s then send command 0
         time.sleep(0.1)
         self._send_fsm_command(0, None)
+
+    def _on_home_clicked(self, _):
+        """Handle HOME button click with confirmation dialog."""
+        if self.server is None or self._cleaned_up:
+            return
+        if self._home_confirm_modal is not None:
+            return
+
+        try:
+            self._home_confirm_modal = self.server.gui.add_modal(
+                self.translator("fsm_home_confirm_title")
+            )
+            with self._home_confirm_modal:
+                confirm_label = self.translator("confirm")
+                cancel_label = self.translator("cancel")
+                action_buttons = self.server.gui.add_button_group(
+                    "",
+                    options=[confirm_label, cancel_label],
+                )
+                action_buttons.on_click(
+                    lambda event: self._confirm_home_switch()
+                    if event.target.value == confirm_label
+                    else self._close_home_confirm_modal()
+                )
+        except Exception as e:
+            logger.error(f"Failed to open HOME confirm dialog: {e}", exc_info=True)
+            self._close_home_confirm_modal()
+
+    def _confirm_home_switch(self):
+        """Confirm and send HOME command."""
+        self._send_fsm_command(1, "HOME")
+        self._close_home_confirm_modal()
+
+    def _close_home_confirm_modal(self):
+        """Close HOME confirmation dialog if open."""
+        try:
+            if self._home_confirm_modal is not None:
+                self._home_confirm_modal.close()
+        except Exception as e:
+            logger.debug(f"Could not close HOME confirm dialog: {e}")
+        finally:
+            self._home_confirm_modal = None
     
     def _send_fsm_command(self, command: int, expected_state: Optional[str] = None):
         """Send FSM command via ROS2RobotInterface."""
@@ -269,7 +312,7 @@ class FSMPanel:
                 # Recreate buttons
                 self._fsm_button_handles["to_home"] = self.server.gui.add_button("HOME", color=(128, 0, 128))
                 self._fsm_button_handles["to_home"].on_click(
-                    lambda _: self._send_fsm_command(1, "HOME")
+                    self._on_home_clicked
                 )
                 
                 self._fsm_button_handles["to_hold"] = self.server.gui.add_button("HOLD", color="yellow")
@@ -313,6 +356,7 @@ class FSMPanel:
         
         # Hide all GUI elements
         try:
+            self._close_home_confirm_modal()
             if self._fsm_state_label is not None:
                 self._fsm_state_label.visible = False
             for handle in self._fsm_button_handles.values():
@@ -338,6 +382,7 @@ class FSMPanel:
         self._fsm_state_label = None
         self._fsm_button_handles.clear()
         self._fsm_switch_pose_button = None
+        self._home_confirm_modal = None
         self._marker_publish_mode_dropdown = None
         self._send_marker_pose_button = None
         self._folder_handle = None

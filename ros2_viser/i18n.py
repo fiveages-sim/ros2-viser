@@ -34,6 +34,7 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "fsm_control": "FSM 控制",
         "current_state": "当前状态",
         "switch_pose": "切换姿态",
+        "fsm_home_confirm_title": "要切换到HOME吗？",
         
         # Gripper Panel
         "ee_control": "末端执行器控制",
@@ -136,6 +137,7 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "fsm_control": "FSM Control",
         "current_state": "Current State",
         "switch_pose": "Switch Pose",
+        "fsm_home_confirm_title": "Confirm Switch to HOME",
         
         # Gripper Panel
         "ee_control": "EE Control",
