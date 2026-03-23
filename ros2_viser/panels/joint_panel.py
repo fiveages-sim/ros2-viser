@@ -1008,8 +1008,19 @@ class JointPanel:
         if self._waist_folder is None:
             return
 
-        visible = (self._current_category == "body")
+        visible = (
+            self._current_category == "body"
+            and self._is_joint_control_enabled
+            and self._joints_initialized
+        )
+
         self._waist_folder.visible = visible
+
+        if not visible and self.ros2_interface is not None:
+            try:
+                self.ros2_interface.send_waist_lifting_relative_position(0.0)
+            except Exception:
+                pass
 
     def update(self):
         """Update Joint panel visibility and state.
