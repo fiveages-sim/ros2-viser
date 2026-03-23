@@ -78,6 +78,7 @@ class JointPanel:
         # Track previous target poses to detect changes
         self._last_left_target_pose: Optional[Dict[str, float]] = None
         self._last_right_target_pose: Optional[Dict[str, float]] = None
+        self._last_body_current_target: Optional[List[float]] = None
         
         # Joint limits cache (from URDF)
         self._joint_limits: Dict[str, Dict[str, float]] = {}  # joint_name -> {'lower': float, 'upper': float}
@@ -324,6 +325,52 @@ class JointPanel:
                             pass  # Ignore errors during update
         except Exception as e:
             logger.error(f"Error updating target poses from interface: {e}", exc_info=True)
+    
+    def _update_body_current_target_from_interface(self):
+        """Update body current target from ros2_interface.
+
+        This avoids duplicate subscriptions in JointPanel. The actual subscription
+        is handled inside ROS2RobotInterface.
+        """
+        if self._cleaned_up or self.ros2_interface is None:
+            return
+        
+        try:
+            # Get latest body current target from interface
+            body_current_target = self.ros2_interface.get_body_current_target()
+            if body_current_target is None:
+                return
+            
+            body_joint_names = self._category_to_joints.get("body", [])
+            if not body_joint_names:
+                return
+            
+            # Only update if target positions actually changed
+            current_positions = list(body_current_target)
+            if self._last_body_current_target == current_positions:
+                return
+            
+            update_count = min(len(body_joint_names), len(current_positions))
+            
+            for i in range(update_count):
+                joint_name = body_joint_names[i]
+                target_value = current_positions[i]
+                
+                # Update cached joint position
+                self._joint_positions[joint_name] = target_value
+                
+                # Update GUI slider if it exists
+                if joint_name in self._joint_controls:
+                    control = self._joint_controls[joint_name]
+                    if 'slider' in control:
+                        try:
+                            control['slider'].value = target_value
+                        except Exception:
+                            pass  # Ignore GUI update errors
+            
+            self._last_body_target_positions = current_positions.copy()
+        except Exception as e:
+            logger.error(f"Error updating body target positions from interface: {e}", exc_info=True)
     
     def _get_available_categories(self) -> List[str]:
         """Get available joint categories based on ros2_interface configuration.
@@ -917,6 +964,8 @@ class JointPanel:
             
             # Update target poses from interface (for OCS2 mode)
             self._update_target_poses_from_interface()
+            # Update body current target from interface
+            self._update_body_current_target_from_interface()
             
             is_enabled = self._is_joint_control_enabled
             current_command = self._current_fsm_command
