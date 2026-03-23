@@ -67,6 +67,12 @@ class JointPanel:
         self._category_dropdown: Optional[viser.GuiDropdownHandle] = None
         self._status_text: Optional[viser.GuiTextHandle] = None
         self._send_button: Optional[viser.GuiButtonHandle] = None
+
+        # Waist control UI handles
+        self._waist_folder = None
+        self._waist_lifting_slider = None
+        self._waist_up_button = None
+        self._waist_down_button = None
         
         # Joint control GUI elements
         self._joint_controls: Dict[str, Dict] = {}  # joint_name -> {slider, label, etc}
@@ -597,6 +603,23 @@ class JointPanel:
                 
                 # Send button will be created in _rebuild_joint_controls() to appear at the bottom
                 
+            # Waist control folder (only visible in body category)
+            self._waist_folder = self.server.gui.add_folder("腰部相对位置升降控制")
+            with self._waist_folder:
+                self._waist_lifting_slider = self.server.gui.add_slider(
+                    "升降距离（米）",
+                    min=0.0,
+                    max=1.0,
+                    step=0.01,
+                    initial_value=0.1,
+                )
+
+                self._waist_up_button = self.server.gui.add_button("上升")
+                self._waist_up_button.on_click(lambda _: self._on_waist_up_click())
+                self._waist_down_button = self.server.gui.add_button("下降")
+                self._waist_down_button.on_click(lambda _: self._on_waist_down_click())
+
+            self._waist_folder.visible = False
         except Exception as e:
             logger.error(f"Failed to initialize Joint panel GUI: {e}", exc_info=True)
             raise
@@ -945,6 +968,21 @@ class JointPanel:
         if self._current_category not in ["left", "right"]:
             logger.info(f"Published {len(positions)} joint positions for category: {self._current_category}")
     
+    def _on_waist_up_click(self):
+        scale = self._waist_lifting_slider.value if self._waist_lifting_slider is not None else 0.0
+        self.ros2_interface.send_waist_lifting_relative_position(scale)
+
+    def _on_waist_down_click(self):
+        scale = self._waist_lifting_slider.value if self._waist_lifting_slider is not None else 0.0
+        self.ros2_interface.send_waist_lifting_relative_position(-scale)
+
+    def _update_waist_visibility(self):
+        if self._waist_folder is None:
+            return
+
+        visible = (self._current_category == "body")
+        self._waist_folder.visible = visible
+
     def update(self):
         """Update Joint panel visibility and state.
         
@@ -1015,6 +1053,8 @@ class JointPanel:
                 except Exception:
                     pass
             
+            self._update_waist_visibility()
+
         except Exception as e:
             logger.warning(f"Failed to update Joint panel: {e}")
     
