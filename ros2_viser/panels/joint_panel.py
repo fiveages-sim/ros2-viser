@@ -374,9 +374,9 @@ class JointPanel:
                         except Exception:
                             pass  # Ignore GUI update errors
             
-            self._last_body_target_positions = current_positions.copy()
+            self._last_body_current_target = current_positions.copy()
         except Exception as e:
-            logger.error(f"Error updating body target positions from interface: {e}", exc_info=True)
+            logger.error(f"Error updating body current target from interface: {e}", exc_info=True)
     
     def _get_available_categories(self) -> List[str]:
         """Get available joint categories based on ros2_interface configuration.
@@ -603,27 +603,55 @@ class JointPanel:
                 
                 # Send button will be created in _rebuild_joint_controls() to appear at the bottom
                 
-            # Waist control folder (only visible in body category)
-            self._waist_folder = self.server.gui.add_folder("腰部相对位置升降控制")
-            with self._waist_folder:
-                self._waist_lifting_slider = self.server.gui.add_slider(
-                    "升降距离（米）",
-                    min=0.0,
-                    max=1.0,
-                    step=0.01,
-                    initial_value=0.1,
-                )
-
-                self._waist_up_button = self.server.gui.add_button("上升")
-                self._waist_up_button.on_click(lambda _: self._on_waist_up_click())
-                self._waist_down_button = self.server.gui.add_button("下降")
-                self._waist_down_button.on_click(lambda _: self._on_waist_down_click())
-
-            self._waist_folder.visible = False
+                # Waist control folder (only visible in body category)
+                self._create_waist_controls()
         except Exception as e:
             logger.error(f"Failed to initialize Joint panel GUI: {e}", exc_info=True)
             raise
     
+    def _create_waist_controls(self):
+        """Create waist control UI."""
+        if self._folder_handle is None:
+            return
+
+        # Remove old waist UI first to avoid duplicates when rebuilding labels
+        if self._waist_folder is not None:
+            try:
+                self._waist_folder.remove()
+            except Exception:
+                pass
+
+        # Reset handles
+        self._waist_folder = None
+        self._waist_lifting_slider = None
+        self._waist_up_button = None
+        self._waist_down_button = None
+
+        self._waist_folder = self.server.gui.add_folder(
+            self.translator("waist_control", "腰部相对位置升降控制")
+        )
+
+        with self._waist_folder:
+            self._waist_lifting_slider = self.server.gui.add_slider(
+                self.translator("waist_lifting_distance", "升降距离（米）"),
+                min=0.0,
+                max=1.0,
+                step=0.01,
+                initial_value=0.1,
+            )
+
+            self._waist_up_button = self.server.gui.add_button(
+                self.translator("waist_up", "上升")
+            )
+            self._waist_up_button.on_click(lambda _: self._on_waist_up_click())
+
+            self._waist_down_button = self.server.gui.add_button(
+                self.translator("waist_down", "下降")
+            )
+            self._waist_down_button.on_click(lambda _: self._on_waist_down_click())
+
+        self._waist_folder.visible = (self._current_category == "body")
+
     def _rebuild_joint_controls(self):
         """Rebuild joint control GUI elements based on current category."""
         if not self._joints_initialized or self._folder_handle is None:
@@ -1116,6 +1144,9 @@ class JointPanel:
                 
                 # Send button will be created in _rebuild_joint_controls() to appear at the bottom
             
+                # Recreate waist controls
+                self._create_waist_controls()
+
             # Rebuild joint controls
             self._rebuild_joint_controls()
             
@@ -1151,6 +1182,11 @@ class JointPanel:
         self._category_dropdown = None
         self._status_text = None
         self._send_button = None
+        # Clear waist UI references
+        self._waist_folder = None
+        self._waist_lifting_slider = None
+        self._waist_up_button = None
+        self._waist_down_button = None
         self._joint_controls.clear()
         self._left_arm_controls.clear()
         self._right_arm_controls.clear()
