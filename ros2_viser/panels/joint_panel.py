@@ -657,7 +657,7 @@ class JointPanel:
             self._waist_lifting_slider = self.server.gui.add_slider(
                 self.translator("waist_lifting_distance", "升降距离（米）"),
                 min=0.0,
-                max=1.0,
+                max=0.5,
                 step=0.01,
                 initial_value=0.1,
             )
