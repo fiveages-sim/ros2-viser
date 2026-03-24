@@ -82,7 +82,8 @@ class ControllerConfigDialog(BaseModalDialog):
             'movej_trajectory_duration',
             'movej_trajectory_blend_ratio',
             'movel_duration',
-            'movel_trajectory_duration'
+            'movel_trajectory_duration',
+            'waist_lifting_duration'
         }
         
         # Store original parameter values for change detection

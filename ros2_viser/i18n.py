@@ -96,6 +96,7 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "param_position_threshold": "保持位置阈值",
         "param_trajectory_duration": "轨迹持续时间",
         "param_trajectory_blend_ratio": "轨迹混合比例",
+        "param_lifting_duration": "单次持续时间",
         
         # Interpolation Type Options
         "interpolation_tanh": "Tanh",
