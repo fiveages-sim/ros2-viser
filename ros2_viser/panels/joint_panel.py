@@ -69,10 +69,12 @@ class JointPanel:
         self._send_button: Optional[viser.GuiButtonHandle] = None
 
         # Waist control UI handles
+        self._waist_enabled: bool = False
         self._waist_folder = None
         self._waist_lifting_slider = None
         self._waist_up_button = None
         self._waist_down_button = None
+        self._waist_visible_last: bool = False
         
         # Joint control GUI elements
         self._joint_controls: Dict[str, Dict] = {}  # joint_name -> {slider, label, etc}
@@ -609,7 +611,27 @@ class JointPanel:
             logger.error(f"Failed to initialize Joint panel GUI: {e}", exc_info=True)
             raise
     
+    def _refresh_waist_enabled_from_interface(self):
+        """Query waist_lifting_enabled from /body_joint_controller once."""
+        if self._cleaned_up or self.ros2_interface is None:
+            return
+
+        try:
+            params = self.ros2_interface.list_node_parameters("/body_joint_controller")
+            enabled = False
+            for param in params:
+                if param['name'] == "waist_lifting_enabled":
+                    enabled = param['value']
+            self._waist_enabled = enabled
+            logger.info(f"Waist control enabled from /body_joint_controller: {self._waist_enabled}")
+        except Exception as e:
+            logger.warning(f"Failed to query waist_lifting_enabled from /body_joint_controller: {e}")
+            self._waist_enabled = False
+
     def _create_waist_controls(self):
+        self._refresh_waist_enabled_from_interface()
+        if not self._waist_enabled:
+            return
         """Create waist control UI."""
         if self._folder_handle is None:
             return
@@ -1014,13 +1036,15 @@ class JointPanel:
             and self._joints_initialized
         )
 
-        self._waist_folder.visible = visible
-
-        if not visible and self.ros2_interface is not None:
+        # Only send stop command when transitioning from visible -> hidden
+        if self._waist_visible_last and not visible and self.ros2_interface is not None:
             try:
                 self.ros2_interface.send_waist_lifting_relative_position(0.0)
             except Exception:
                 pass
+
+        self._waist_folder.visible = visible
+        self._waist_visible_last = visible
 
     def update(self):
         """Update Joint panel visibility and state.
@@ -1194,10 +1218,12 @@ class JointPanel:
         self._status_text = None
         self._send_button = None
         # Clear waist UI references
+        self._waist_enabled = False
         self._waist_folder = None
         self._waist_lifting_slider = None
         self._waist_up_button = None
         self._waist_down_button = None
+        self._waist_visible_last = False
         self._joint_controls.clear()
         self._left_arm_controls.clear()
         self._right_arm_controls.clear()
