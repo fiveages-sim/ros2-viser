@@ -67,6 +67,14 @@ class JointPanel:
         self._category_dropdown: Optional[viser.GuiDropdownHandle] = None
         self._status_text: Optional[viser.GuiTextHandle] = None
         self._send_button: Optional[viser.GuiButtonHandle] = None
+
+        # Waist control UI handles
+        self._waist_enabled: bool = False
+        self._waist_folder = None
+        self._waist_lifting_slider = None
+        self._waist_up_button = None
+        self._waist_down_button = None
+        self._waist_visible_last: bool = False
         
         # Joint control GUI elements
         self._joint_controls: Dict[str, Dict] = {}  # joint_name -> {slider, label, etc}
@@ -78,6 +86,7 @@ class JointPanel:
         # Track previous target poses to detect changes
         self._last_left_target_pose: Optional[Dict[str, float]] = None
         self._last_right_target_pose: Optional[Dict[str, float]] = None
+        self._last_body_current_target: Optional[List[float]] = None
         
         # Joint limits cache (from URDF)
         self._joint_limits: Dict[str, Dict[str, float]] = {}  # joint_name -> {'lower': float, 'upper': float}
@@ -325,6 +334,52 @@ class JointPanel:
         except Exception as e:
             logger.error(f"Error updating target poses from interface: {e}", exc_info=True)
     
+    def _update_body_current_target_from_interface(self):
+        """Update body current target from ros2_interface.
+
+        This avoids duplicate subscriptions in JointPanel. The actual subscription
+        is handled inside ROS2RobotInterface.
+        """
+        if self._cleaned_up or self.ros2_interface is None:
+            return
+        
+        try:
+            # Get latest body current target from interface
+            body_current_target = self.ros2_interface.get_body_current_target()
+            if body_current_target is None:
+                return
+            
+            body_joint_names = self._category_to_joints.get("body", [])
+            if not body_joint_names:
+                return
+            
+            # Only update if target positions actually changed
+            current_positions = list(body_current_target)
+            if self._last_body_current_target == current_positions:
+                return
+            
+            update_count = min(len(body_joint_names), len(current_positions))
+            
+            for i in range(update_count):
+                joint_name = body_joint_names[i]
+                target_value = current_positions[i]
+                
+                # Update cached joint position
+                self._joint_positions[joint_name] = target_value
+                
+                # Update GUI slider if it exists
+                if joint_name in self._joint_controls:
+                    control = self._joint_controls[joint_name]
+                    if 'slider' in control:
+                        try:
+                            control['slider'].value = target_value
+                        except Exception:
+                            pass  # Ignore GUI update errors
+            
+            self._last_body_current_target = current_positions.copy()
+        except Exception as e:
+            logger.error(f"Error updating body current target from interface: {e}", exc_info=True)
+    
     def _get_available_categories(self) -> List[str]:
         """Get available joint categories based on ros2_interface configuration.
         
@@ -550,10 +605,75 @@ class JointPanel:
                 
                 # Send button will be created in _rebuild_joint_controls() to appear at the bottom
                 
+                # Waist control folder (only visible in body category)
+                self._create_waist_controls()
         except Exception as e:
             logger.error(f"Failed to initialize Joint panel GUI: {e}", exc_info=True)
             raise
     
+    def _refresh_waist_enabled_from_interface(self):
+        """Query waist_lifting_enabled from /body_joint_controller once."""
+        if self._cleaned_up or self.ros2_interface is None:
+            return
+
+        try:
+            params = self.ros2_interface.list_node_parameters("/body_joint_controller")
+            enabled = False
+            for param in params:
+                if param['name'] == "waist_lifting_enabled":
+                    enabled = param['value']
+            self._waist_enabled = enabled
+            logger.info(f"Waist control enabled from /body_joint_controller: {self._waist_enabled}")
+        except Exception as e:
+            logger.warning(f"Failed to query waist_lifting_enabled from /body_joint_controller: {e}")
+            self._waist_enabled = False
+
+    def _create_waist_controls(self):
+        self._refresh_waist_enabled_from_interface()
+        if not self._waist_enabled:
+            return
+        """Create waist control UI."""
+        if self._folder_handle is None:
+            return
+
+        # Remove old waist UI first to avoid duplicates when rebuilding labels
+        if self._waist_folder is not None:
+            try:
+                self._waist_folder.remove()
+            except Exception:
+                pass
+
+        # Reset handles
+        self._waist_folder = None
+        self._waist_lifting_slider = None
+        self._waist_up_button = None
+        self._waist_down_button = None
+
+        self._waist_folder = self.server.gui.add_folder(
+            self.translator("waist_control", "腰部相对位置升降控制")
+        )
+
+        with self._waist_folder:
+            self._waist_lifting_slider = self.server.gui.add_slider(
+                self.translator("waist_lifting_distance", "升降距离（米）"),
+                min=0.0,
+                max=0.5,
+                step=0.01,
+                initial_value=0.1,
+            )
+
+            self._waist_up_button = self.server.gui.add_button(
+                self.translator("waist_up", "上升")
+            )
+            self._waist_up_button.on_click(lambda _: self._on_waist_up_click())
+
+            self._waist_down_button = self.server.gui.add_button(
+                self.translator("waist_down", "下降")
+            )
+            self._waist_down_button.on_click(lambda _: self._on_waist_down_click())
+
+        self._waist_folder.visible = (self._current_category == "body")
+
     def _rebuild_joint_controls(self):
         """Rebuild joint control GUI elements based on current category."""
         if not self._joints_initialized or self._folder_handle is None:
@@ -898,6 +1018,34 @@ class JointPanel:
         if self._current_category not in ["left", "right"]:
             logger.info(f"Published {len(positions)} joint positions for category: {self._current_category}")
     
+    def _on_waist_up_click(self):
+        scale = self._waist_lifting_slider.value if self._waist_lifting_slider is not None else 0.0
+        self.ros2_interface.send_waist_lifting_relative_position(scale)
+
+    def _on_waist_down_click(self):
+        scale = self._waist_lifting_slider.value if self._waist_lifting_slider is not None else 0.0
+        self.ros2_interface.send_waist_lifting_relative_position(-scale)
+
+    def _update_waist_visibility(self):
+        if self._waist_folder is None:
+            return
+
+        visible = (
+            self._current_category == "body"
+            and self._is_joint_control_enabled
+            and self._joints_initialized
+        )
+
+        # Only send stop command when transitioning from visible -> hidden
+        if self._waist_visible_last and not visible and self.ros2_interface is not None:
+            try:
+                self.ros2_interface.send_waist_lifting_relative_position(0.0)
+            except Exception:
+                pass
+
+        self._waist_folder.visible = visible
+        self._waist_visible_last = visible
+
     def update(self):
         """Update Joint panel visibility and state.
         
@@ -917,6 +1065,8 @@ class JointPanel:
             
             # Update target poses from interface (for OCS2 mode)
             self._update_target_poses_from_interface()
+            # Update body current target from interface
+            self._update_body_current_target_from_interface()
             
             is_enabled = self._is_joint_control_enabled
             current_command = self._current_fsm_command
@@ -966,6 +1116,8 @@ class JointPanel:
                 except Exception:
                     pass
             
+            self._update_waist_visibility()
+
         except Exception as e:
             logger.warning(f"Failed to update Joint panel: {e}")
     
@@ -1027,6 +1179,9 @@ class JointPanel:
                 
                 # Send button will be created in _rebuild_joint_controls() to appear at the bottom
             
+                # Recreate waist controls
+                self._create_waist_controls()
+
             # Rebuild joint controls
             self._rebuild_joint_controls()
             
@@ -1062,6 +1217,13 @@ class JointPanel:
         self._category_dropdown = None
         self._status_text = None
         self._send_button = None
+        # Clear waist UI references
+        self._waist_enabled = False
+        self._waist_folder = None
+        self._waist_lifting_slider = None
+        self._waist_up_button = None
+        self._waist_down_button = None
+        self._waist_visible_last = False
         self._joint_controls.clear()
         self._left_arm_controls.clear()
         self._right_arm_controls.clear()
