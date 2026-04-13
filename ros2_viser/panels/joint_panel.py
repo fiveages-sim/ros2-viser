@@ -50,8 +50,8 @@ class JointPanel:
         self.translator = get_translator()
         
         # FSM state tracking
-        self._current_fsm_command: int = 2  # Default to HOLD
-        self._is_joint_control_enabled: bool = False  # Enabled when command is 3 or 4
+        self._current_fsm_state: str = "HOLD"
+        self._is_joint_control_enabled: bool = False  # Enabled when state is OCS2 or MOVEJ
         
         # Joint state tracking
         self._joint_names: List[str] = []
@@ -121,10 +121,10 @@ class JointPanel:
             # If ros2_interface is already connected, get actual FSM state instead of using default
             if self.ros2_interface is not None and self.ros2_interface.is_connected:
                 try:
-                    actual_command = self.ros2_interface.get_fsm_command()
-                    self._current_fsm_command = actual_command
-                    self._is_joint_control_enabled = (actual_command == 3 or actual_command == 4)
-                    logger.debug(f"Initialized with actual FSM state: {actual_command}")
+                    actual_state = self.ros2_interface.get_fsm_state()
+                    self._current_fsm_state = actual_state
+                    self._is_joint_control_enabled = (actual_state in ("OCS2", "MOVEJ"))
+                    logger.debug(f"Initialized with actual FSM state: {actual_state}")
                 except Exception as e:
                     logger.debug(f"Could not get initial FSM state from ros2_interface: {e}")
             
@@ -175,13 +175,13 @@ class JointPanel:
             return False
         
         try:
-            # Get FSM command from interface
-            command = self.ros2_interface.get_fsm_command()
+            # Get FSM state from interface
+            state = self.ros2_interface.get_fsm_state()
             
-            if command != self._current_fsm_command:
-                self._current_fsm_command = command
-                # Enable joint control when command is 3 (OCS2) or 4 (MOVEJ)
-                self._is_joint_control_enabled = (command == 3 or command == 4)
+            if state != self._current_fsm_state:
+                self._current_fsm_state = state
+                # Enable joint control when state is OCS2 or MOVEJ
+                self._is_joint_control_enabled = (state in ("OCS2", "MOVEJ"))
                 return True
             return False
         except Exception as e:
@@ -244,15 +244,15 @@ class JointPanel:
     def _update_target_poses_from_interface(self):
         """Update left/right target poses from ros2_interface (called from update loop, not callback).
         
-        Only updates when FSM state is OCS2 (command == 3), as target poses are only relevant in OCS2 mode.
+        Only updates when FSM state is OCS2, as target poses are only relevant in OCS2 mode.
         """
         if self._cleaned_up or self.ros2_interface is None:
             return
         
-        # Only update target poses in OCS2 mode (command == 3)
-        current_command = self._current_fsm_command
+        # Only update target poses in OCS2 mode
+        current_state = self._current_fsm_state
         
-        if current_command != 3:  # OCS2 mode
+        if current_state != "OCS2":
             return
         
         try:
@@ -713,17 +713,17 @@ class JointPanel:
             self._send_button = None
         
         # Get joints for current category
-        current_command = self._current_fsm_command
+        current_state = self._current_fsm_state
         
         # Get joints to show
         joints_to_show = list(self._category_to_joints.get(self._current_category, []))  # Copy
         
         # For left/right category:
-        # - OCS2 mode (command == 3): show pose controls
-        # - MOVEJ mode (command == 4): show joint controls
-        if current_command == 3 and self._current_category == "left":
+        # - OCS2 mode: show pose controls
+        # - MOVEJ mode: show joint controls
+        if current_state == "OCS2" and self._current_category == "left":
             self._create_left_arm_pose_controls()
-        elif current_command == 3 and self._current_category == "right":
+        elif current_state == "OCS2" and self._current_category == "right":
             self._create_right_arm_pose_controls()
         else:
             # Create joint sliders (for all categories including left/right in MOVEJ mode)
@@ -926,10 +926,10 @@ class JointPanel:
         if not self._joints_initialized:
             return
         
-        current_command = self._current_fsm_command
+        current_state = self._current_fsm_state
         
         # Handle left arm in OCS2 mode
-        if current_command == 3 and self._current_category == "left":
+        if current_state == "OCS2" and self._current_category == "left":
             if self.ros2_interface.left_arm_handler and self._left_arm_controls:
                 from geometry_msgs.msg import Pose
                 pose = Pose()
@@ -953,7 +953,7 @@ class JointPanel:
             return
         
         # Handle right arm in OCS2 mode
-        if current_command == 3 and self._current_category == "right":
+        if current_state == "OCS2" and self._current_category == "right":
             if self.ros2_interface.right_arm_handler and self._right_arm_controls:
                 from geometry_msgs.msg import Pose
                 pose = Pose()
@@ -1069,7 +1069,7 @@ class JointPanel:
             self._update_body_current_target_from_interface()
             
             is_enabled = self._is_joint_control_enabled
-            current_command = self._current_fsm_command
+            current_state = self._current_fsm_state
             
             # Update status text (only visible when control is not enabled)
             if self._status_text is not None:
@@ -1101,7 +1101,7 @@ class JointPanel:
             
             # Update left/right arm controls visibility
             show_left = (is_enabled and self._joints_initialized and 
-                        current_command == 3 and self._current_category == "left")
+                        current_state == "OCS2" and self._current_category == "left")
             for control in self._left_arm_controls.values():
                 try:
                     control.visible = show_left
@@ -1109,7 +1109,7 @@ class JointPanel:
                     pass
             
             show_right = (is_enabled and self._joints_initialized and 
-                         current_command == 3 and self._current_category == "right")
+                         current_state == "OCS2" and self._current_category == "right")
             for control in self._right_arm_controls.values():
                 try:
                     control.visible = show_right
