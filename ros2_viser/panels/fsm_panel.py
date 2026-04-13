@@ -269,7 +269,7 @@ class FSMPanel:
         """
         current_state = self.ros2_interface.get_fsm_state()
         # Update if state changed or if this is the first update (INVALID state)
-        if current_state != self._current_fsm_state or self._current_fsm_state == -1:
+        if current_state != self._current_fsm_state or self._current_fsm_state == 0:
             self._current_fsm_state = current_state
             if self._fsm_state_label is not None:
                 self._fsm_state_label.value = self._fsm_state_to_name(current_state)
@@ -356,7 +356,7 @@ class FSMPanel:
             except Exception as e:
                 logger.debug(f"Could not remove old folder: {e}")
             
-            self._current_fsm_state = -1
+            self._current_fsm_state = 0
             self.update()
             
             logger.debug("FSM panel GUI labels updated")
