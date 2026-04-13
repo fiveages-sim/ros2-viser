@@ -52,7 +52,7 @@ class FSMPanel:
         self.translator = get_translator()
         
         # FSM state tracking
-        self._current_fsm_state: str = "INVALID"
+        self._current_fsm_state: int = 0
         
         # GUI elements
         self._fsm_state_label: Optional[viser.GuiTextHandle] = None
@@ -84,7 +84,7 @@ class FSMPanel:
             
             # Initialize GUI
             self._init_gui()
-            self._current_fsm_state = "INVALID"
+            self._current_fsm_state = 0
             self.update()
             
             self._initialized = True
@@ -229,6 +229,16 @@ class FSMPanel:
             logger.warning("ROS2RobotInterface not connected, cannot send FSM command")
             return
         self.ros2_interface.send_fsm_command(command)
+
+    @staticmethod
+    def _fsm_state_to_name(state: int) -> str:
+        state_map = {
+            1: "HOME",
+            2: "HOLD",
+            3: "OCS2",
+            4: "MOVEJ",
+        }
+        return state_map.get(state, f"UNKNOWN({state})")
     
     def set_marker_callbacks(self, on_mode_changed, on_send_clicked):
         """Set callbacks for marker controls.
@@ -259,25 +269,25 @@ class FSMPanel:
         """
         current_state = self.ros2_interface.get_fsm_state()
         # Update if state changed or if this is the first update (INVALID state)
-        if current_state != self._current_fsm_state or self._current_fsm_state == "INVALID":
+        if current_state != self._current_fsm_state or self._current_fsm_state == -1:
             self._current_fsm_state = current_state
             if self._fsm_state_label is not None:
-                self._fsm_state_label.value = current_state
+                self._fsm_state_label.value = self._fsm_state_to_name(current_state)
             
             # Only update button visibility when state changes
-            if current_state == "HOME":
+            if current_state == 1:
                 self._fsm_button_handles["to_home"].visible = False
                 self._fsm_button_handles["to_hold"].visible = True
                 self._fsm_button_handles["to_ocs2"].visible = False
                 self._fsm_button_handles["to_movej"].visible = False
                 self._fsm_switch_pose_button.visible = True
-            elif current_state == "HOLD":
+            elif current_state == 2:
                 self._fsm_button_handles["to_home"].visible = True
                 self._fsm_button_handles["to_hold"].visible = False
                 self._fsm_button_handles["to_ocs2"].visible = True
                 self._fsm_button_handles["to_movej"].visible = True
                 self._fsm_switch_pose_button.visible = False
-            elif current_state == "OCS2":
+            elif current_state == 3:
                 self._fsm_button_handles["to_home"].visible = False
                 self._fsm_button_handles["to_hold"].visible = True
                 self._fsm_button_handles["to_ocs2"].visible = False
@@ -285,7 +295,7 @@ class FSMPanel:
                 self._fsm_switch_pose_button.visible = False
                 # Show marker controls in OCS2 mode (visibility managed by marker manager)
                 # Marker manager will handle showing/hiding based on publish mode
-            elif current_state == "MOVEJ":
+            elif current_state == 4:
                 # MOVEJ state: can only go to HOLD
                 self._fsm_button_handles["to_home"].visible = False
                 self._fsm_button_handles["to_hold"].visible = True
@@ -307,7 +317,7 @@ class FSMPanel:
             with self._folder_handle:
                 self._fsm_state_label = self.server.gui.add_text(
                     self.translator("current_state"),
-                    initial_value=self._current_fsm_state,
+                    initial_value=self._fsm_state_to_name(self._current_fsm_state),
                     disabled=True
                 )
                 
@@ -346,7 +356,7 @@ class FSMPanel:
             except Exception as e:
                 logger.debug(f"Could not remove old folder: {e}")
             
-            self._current_fsm_state = "INVALID"
+            self._current_fsm_state = -1
             self.update()
             
             logger.debug("FSM panel GUI labels updated")

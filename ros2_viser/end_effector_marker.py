@@ -667,7 +667,7 @@ class EndEffectorMarkerManager:
             return False
         
         fsm_state = self.ros2_interface.get_fsm_state()
-        return fsm_state == "OCS2"
+        return fsm_state == 3
     
     def _update_marker_visibility(self, is_ocs2: bool):
         """Update marker visibility based on FSM state."""

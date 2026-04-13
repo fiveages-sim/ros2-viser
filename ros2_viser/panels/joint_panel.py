@@ -50,7 +50,7 @@ class JointPanel:
         self.translator = get_translator()
         
         # FSM state tracking
-        self._current_fsm_state: str = "HOLD"
+        self._current_fsm_state: int = 2
         self._is_joint_control_enabled: bool = False  # Enabled when state is OCS2 or MOVEJ
         
         # Joint state tracking
@@ -123,7 +123,7 @@ class JointPanel:
                 try:
                     actual_state = self.ros2_interface.get_fsm_state()
                     self._current_fsm_state = actual_state
-                    self._is_joint_control_enabled = (actual_state in ("OCS2", "MOVEJ"))
+                    self._is_joint_control_enabled = (actual_state in (3, 4))
                     logger.debug(f"Initialized with actual FSM state: {actual_state}")
                 except Exception as e:
                     logger.debug(f"Could not get initial FSM state from ros2_interface: {e}")
@@ -181,7 +181,7 @@ class JointPanel:
             if state != self._current_fsm_state:
                 self._current_fsm_state = state
                 # Enable joint control when state is OCS2 or MOVEJ
-                self._is_joint_control_enabled = (state in ("OCS2", "MOVEJ"))
+                self._is_joint_control_enabled = (state in (3, 4))
                 return True
             return False
         except Exception as e:
@@ -252,7 +252,7 @@ class JointPanel:
         # Only update target poses in OCS2 mode
         current_state = self._current_fsm_state
         
-        if current_state != "OCS2":
+        if current_state != 3:
             return
         
         try:
@@ -721,9 +721,9 @@ class JointPanel:
         # For left/right category:
         # - OCS2 mode: show pose controls
         # - MOVEJ mode: show joint controls
-        if current_state == "OCS2" and self._current_category == "left":
+        if current_state == 3 and self._current_category == "left":
             self._create_left_arm_pose_controls()
-        elif current_state == "OCS2" and self._current_category == "right":
+        elif current_state == 3 and self._current_category == "right":
             self._create_right_arm_pose_controls()
         else:
             # Create joint sliders (for all categories including left/right in MOVEJ mode)
@@ -929,7 +929,7 @@ class JointPanel:
         current_state = self._current_fsm_state
         
         # Handle left arm in OCS2 mode
-        if current_state == "OCS2" and self._current_category == "left":
+        if current_state == 3 and self._current_category == "left":
             if self.ros2_interface.left_arm_handler and self._left_arm_controls:
                 from geometry_msgs.msg import Pose
                 pose = Pose()
@@ -953,7 +953,7 @@ class JointPanel:
             return
         
         # Handle right arm in OCS2 mode
-        if current_state == "OCS2" and self._current_category == "right":
+        if current_state == 3 and self._current_category == "right":
             if self.ros2_interface.right_arm_handler and self._right_arm_controls:
                 from geometry_msgs.msg import Pose
                 pose = Pose()
@@ -1101,7 +1101,7 @@ class JointPanel:
             
             # Update left/right arm controls visibility
             show_left = (is_enabled and self._joints_initialized and 
-                        current_state == "OCS2" and self._current_category == "left")
+                        current_state == 3 and self._current_category == "left")
             for control in self._left_arm_controls.values():
                 try:
                     control.visible = show_left
@@ -1109,7 +1109,7 @@ class JointPanel:
                     pass
             
             show_right = (is_enabled and self._joints_initialized and 
-                         current_state == "OCS2" and self._current_category == "right")
+                         current_state == 3 and self._current_category == "right")
             for control in self._right_arm_controls.values():
                 try:
                     control.visible = show_right
