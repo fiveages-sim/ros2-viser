@@ -106,7 +106,7 @@ class FSMPanel:
                 # Current state display (read-only)
                 self._fsm_state_label = self.server.gui.add_text(
                     self.translator("current_state"),
-                    initial_value="HOLD",
+                    initial_value="INVALID",
                     disabled=True
                 )
                 
@@ -261,6 +261,8 @@ class FSMPanel:
         # Update if state changed or if this is the first update (INVALID state)
         if current_state != self._current_fsm_state or self._current_fsm_state == "INVALID":
             self._current_fsm_state = current_state
+            if self._fsm_state_label is not None:
+                self._fsm_state_label.value = current_state
             
             # Only update button visibility when state changes
             if current_state == "HOME":
