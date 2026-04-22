@@ -662,12 +662,12 @@ class EndEffectorMarkerManager:
                 self._last_right_ee_pose = None
     
     def _is_ocs2_mode(self) -> bool:
-        """Check if robot is in OCS2 mode (FSM command == 3)."""
+        """Check if robot is in OCS2 mode (FSM state == OCS2)."""
         if self.ros2_interface is None or not self.ros2_interface.is_connected:
             return False
         
-        fsm_command = self.ros2_interface.get_fsm_command()
-        return fsm_command == 3
+        fsm_state = self.ros2_interface.get_fsm_state()
+        return fsm_state == 3
     
     def _update_marker_visibility(self, is_ocs2: bool):
         """Update marker visibility based on FSM state."""
