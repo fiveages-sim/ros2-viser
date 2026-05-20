@@ -60,6 +60,19 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "switch_to_joint_control_state": "请切换到支持关节控制的状态 (OCS2 或 MOVEJ)",
         "ready": "就绪",
         
+        # Waist control (lift + turn)
+        "waist_control": "腰部控制",
+        "waist_lifting_distance": "升降距离（米）",
+        "waist_lifting_ratio": "升降速度比",
+        "waist_actions": "腰部操作",
+        "waist_step_up": "上升(距离)",
+        "waist_step_down": "下降(距离)",
+        "waist_hold_up": "上升(按住)",
+        "waist_hold_down": "下降(按住)",
+        "waist_turning_ratio": "旋转速度比",
+        "waist_hold_turn_left": "左转(按住)",
+        "waist_hold_turn_right": "右转(按住)",
+        
         # Hardware Panel
         "hardware_control": "驱动层配置",
         "hardware_system_detected": "硬件系统已检测",
@@ -163,6 +176,19 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "waiting_for_joints": "Waiting for joints initialization",
         "switch_to_joint_control_state": "Please switch to joint control state (OCS2 or MOVEJ)",
         "ready": "Ready",
+        
+        # Waist control (lift + turn)
+        "waist_control": "Waist Control",
+        "waist_lifting_distance": "Step Distance (m)",
+        "waist_lifting_ratio": "Lift Speed Ratio",
+        "waist_actions": "Waist Actions",
+        "waist_step_up": "Up (step)",
+        "waist_step_down": "Down (step)",
+        "waist_hold_up": "Up (hold)",
+        "waist_hold_down": "Down (hold)",
+        "waist_turning_ratio": "Turn Speed Ratio",
+        "waist_hold_turn_left": "Turn Left (hold)",
+        "waist_hold_turn_right": "Turn Right (hold)",
         
         # Hardware Panel
         "hardware_control": "Hardware Config",
@@ -312,6 +338,24 @@ def set_global_language(language: Language):
         language: Language code ("zh" or "en").
     """
     _global_translator.set_language(language)
+
+
+def get_text_in_language(language: Language, key: str, default: str = None) -> str:
+    """Get translated text for a key in a specific language (ignores global setting).
+
+    Args:
+        language: Language code ("zh" or "en").
+        key: Translation key.
+        default: Default value if key not found.
+
+    Returns:
+        Translated text.
+    """
+    translations = _TRANSLATIONS.get(language, {})
+    result = translations.get(key, default)
+    if result is None:
+        return key
+    return result
 
 
 def t(key: str, default: str = None) -> str:

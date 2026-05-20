@@ -287,11 +287,6 @@ class ControllerPanel:
             return
         
         try:
-            # Store current status value
-            current_status_value = None
-            if self._status_text is not None:
-                current_status_value = self._status_text.value
-            
             # Get current controllers
             controllers = _list_controllers(self.ros2_interface)
             
@@ -309,8 +304,8 @@ class ControllerPanel:
                 else:
                     status_text = self.translator("no_controllers_found")
                 
-                # Use current value if available, otherwise use default
-                status_value = current_status_value if current_status_value else status_text
+                # Always refresh status from live controller list (retranslates on language change)
+                status_value = status_text
                 
                 self._status_text = self.server.gui.add_text(
                     self.translator("status"),

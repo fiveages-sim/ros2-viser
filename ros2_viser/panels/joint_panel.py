@@ -1,6 +1,7 @@
 """Joint Control Panel for ROS2 Viser."""
 
 import logging
+import time
 from typing import Optional, Dict, List, Any
 from io import StringIO
 
@@ -70,11 +71,27 @@ class JointPanel:
 
         # Waist control UI handles
         self._waist_enabled: bool = False
+        self._waist_command_enabled: bool = False
+        self._waist_turning_command_enabled: bool = False
         self._waist_folder = None
         self._waist_lifting_slider = None
-        self._waist_up_button = None
-        self._waist_down_button = None
-        self._waist_visible_last: bool = False
+        self._waist_speed_slider = None
+        self._waist_turn_speed_slider = None
+        self._waist_action_group = None
+        self._waist_hold_up_button = None
+        self._waist_hold_down_button = None
+        self._waist_hold_turn_left_button = None
+        self._waist_hold_turn_right_button = None
+        self._waist_hold_active: bool = False
+        self._waist_turn_hold_active: bool = False
+        self._waist_last_hold_callback_time: float = 0.0
+        self._waist_turn_last_hold_callback_time: float = 0.0
+        self._waist_hold_release_timeout_s: float = 0.15
+        # Cached button labels (for button_group / hold dispatch)
+        self._waist_label_step_up: str = ""
+        self._waist_label_step_down: str = ""
+        self._waist_label_hold_up: str = ""
+        self._waist_label_hold_down: str = ""
         
         # Joint control GUI elements
         self._joint_controls: Dict[str, Dict] = {}  # joint_name -> {slider, label, etc}
@@ -407,7 +424,42 @@ class JointPanel:
             categories.append('right_hand')
         
         return categories
-    
+
+    _CATEGORY_I18N_KEYS = {
+        "body": "category_body",
+        "head": "category_head",
+        "left": "category_left",
+        "right": "category_right",
+        "left_hand": "category_left_hand",
+        "right_hand": "category_right_hand",
+    }
+
+    def _categories_with_joints(self) -> List[str]:
+        """Categories that have at least one joint in the current model."""
+        available = self._get_available_categories()
+        return [
+            cat
+            for cat in available
+            if cat in self._category_to_joints and self._category_to_joints[cat]
+        ]
+
+    def _translated_category_label(self, category: str) -> str:
+        key = self._CATEGORY_I18N_KEYS.get(category, category)
+        return self.translator(key, category)
+
+    def _set_current_category(self, category: str) -> None:
+        """Switch joint category and refresh controls."""
+        if not category or category == self._current_category:
+            return
+
+        self._current_category = category
+        if self._category_dropdown is not None:
+            label = self._translated_category_label(category)
+            if label in self._category_dropdown.options:
+                self._category_dropdown.value = label
+
+        self._rebuild_joint_controls()
+
     def set_urdf(self, urdf: Any) -> None:
         """Set URDF object from visualizer (to avoid re-parsing).
         
@@ -612,9 +664,16 @@ class JointPanel:
             raise
     
     def _refresh_waist_enabled_from_interface(self):
-        """Query waist_lifting_enabled from /body_joint_controller once."""
+        """Query waist_lifting_enabled and velocity command availability."""
         if self._cleaned_up or self.ros2_interface is None:
             return
+
+        self._waist_command_enabled = (
+            getattr(self.ros2_interface, "waist_lifting_command_pub", None) is not None
+        )
+        self._waist_turning_command_enabled = (
+            getattr(self.ros2_interface, "waist_turning_command_pub", None) is not None
+        )
 
         try:
             params = self.ros2_interface.list_node_parameters("/body_joint_controller")
@@ -623,16 +682,21 @@ class JointPanel:
                 if param['name'] == "waist_lifting_enabled":
                     enabled = param['value']
             self._waist_enabled = enabled
-            logger.info(f"Waist control enabled from /body_joint_controller: {self._waist_enabled}")
+            logger.info(
+                "Waist control enabled=%s, lift command=%s, turn command=%s",
+                self._waist_enabled,
+                self._waist_command_enabled,
+                self._waist_turning_command_enabled,
+            )
         except Exception as e:
             logger.warning(f"Failed to query waist_lifting_enabled from /body_joint_controller: {e}")
             self._waist_enabled = False
 
     def _create_waist_controls(self):
+        """Create waist control UI (step distance + hold velocity)."""
         self._refresh_waist_enabled_from_interface()
         if not self._waist_enabled:
             return
-        """Create waist control UI."""
         if self._folder_handle is None:
             return
 
@@ -646,31 +710,93 @@ class JointPanel:
         # Reset handles
         self._waist_folder = None
         self._waist_lifting_slider = None
-        self._waist_up_button = None
-        self._waist_down_button = None
+        self._waist_speed_slider = None
+        self._waist_turn_speed_slider = None
+        self._waist_action_group = None
+        self._waist_hold_up_button = None
+        self._waist_hold_down_button = None
+        self._waist_hold_turn_left_button = None
+        self._waist_hold_turn_right_button = None
+        self._waist_hold_active = False
+        self._waist_turn_hold_active = False
 
-        self._waist_folder = self.server.gui.add_folder(
-            self.translator("waist_control", "腰部相对位置升降控制")
-        )
+        self._waist_label_step_up = self.translator("waist_step_up")
+        self._waist_label_step_down = self.translator("waist_step_down")
+        self._waist_label_hold_up = self.translator("waist_hold_up")
+        self._waist_label_hold_down = self.translator("waist_hold_down")
+
+        # Step distance in button group; velocity hold on on_hold buttons (same folder).
+        group_options = [self._waist_label_step_up, self._waist_label_step_down]
+
+        self._waist_folder = self.server.gui.add_folder(self.translator("waist_control"))
 
         with self._waist_folder:
             self._waist_lifting_slider = self.server.gui.add_slider(
-                self.translator("waist_lifting_distance", "升降距离（米）"),
+                self.translator("waist_lifting_distance"),
                 min=0.0,
                 max=0.5,
                 step=0.01,
                 initial_value=0.1,
             )
 
-            self._waist_up_button = self.server.gui.add_button(
-                self.translator("waist_up", "上升")
-            )
-            self._waist_up_button.on_click(lambda _: self._on_waist_up_click())
+            if self._waist_command_enabled:
+                self._waist_speed_slider = self.server.gui.add_slider(
+                    self.translator("waist_lifting_ratio"),
+                    min=0.05,
+                    max=1.0,
+                    step=0.05,
+                    initial_value=0.3,
+                )
 
-            self._waist_down_button = self.server.gui.add_button(
-                self.translator("waist_down", "下降")
+            self._waist_action_group = self.server.gui.add_button_group(
+                self.translator("waist_actions"),
+                options=group_options,
             )
-            self._waist_down_button.on_click(lambda _: self._on_waist_down_click())
+            self._waist_action_group.on_click(self._on_waist_action_group_click)
+
+            # Viser button_group only supports on_click (step). Hold uses on_hold on
+            # companion buttons with matching labels (rendered below the group).
+            if self._waist_command_enabled:
+                self._waist_hold_up_button = self.server.gui.add_button(
+                    self._waist_label_hold_up,
+                    color="green",
+                )
+                self._waist_hold_up_button.on_hold(callback_hz=10.0)(
+                    lambda _: self._on_waist_hold_tick(1.0)
+                )
+
+                self._waist_hold_down_button = self.server.gui.add_button(
+                    self._waist_label_hold_down,
+                    color="green",
+                )
+                self._waist_hold_down_button.on_hold(callback_hz=10.0)(
+                    lambda _: self._on_waist_hold_tick(-1.0)
+                )
+
+            if self._waist_turning_command_enabled:
+                self._waist_turn_speed_slider = self.server.gui.add_slider(
+                    self.translator("waist_turning_ratio"),
+                    min=0.05,
+                    max=1.0,
+                    step=0.05,
+                    initial_value=0.3,
+                )
+
+                self._waist_hold_turn_left_button = self.server.gui.add_button(
+                    self.translator("waist_hold_turn_left"),
+                    color="blue",
+                )
+                self._waist_hold_turn_left_button.on_hold(callback_hz=10.0)(
+                    lambda _: self._on_waist_turn_hold_tick(-1.0)
+                )
+
+                self._waist_hold_turn_right_button = self.server.gui.add_button(
+                    self.translator("waist_hold_turn_right"),
+                    color="blue",
+                )
+                self._waist_hold_turn_right_button.on_hold(callback_hz=10.0)(
+                    lambda _: self._on_waist_turn_hold_tick(1.0)
+                )
 
         self._waist_folder.visible = (self._current_category == "body")
 
@@ -894,21 +1020,11 @@ class JointPanel:
         
         selected = self._category_dropdown.value
         
-        # Find category by translation
-        category_map = {
-            'category_body': 'body',
-            'category_head': 'head',
-            'category_left': 'left',
-            'category_right': 'right',
-            'category_left_hand': 'left_hand',
-            'category_right_hand': 'right_hand'
-        }
-        for trans_key, cat in category_map.items():
-            if self.translator(trans_key, cat) == selected:
-                self._current_category = cat
+        for cat in self._categories_with_joints():
+            if self._translated_category_label(cat) == selected:
+                self._set_current_category(cat)
                 break
-        
-        self._rebuild_joint_controls()
+
         self.update()
     
     def _on_send_button_clicked(self):
@@ -1018,13 +1134,99 @@ class JointPanel:
         if self._current_category not in ["left", "right"]:
             logger.info(f"Published {len(positions)} joint positions for category: {self._current_category}")
     
-    def _on_waist_up_click(self):
-        scale = self._waist_lifting_slider.value if self._waist_lifting_slider is not None else 0.0
-        self.ros2_interface.send_waist_lifting_relative_position(scale)
+    def _on_waist_action_group_click(self, event: viser.GuiEvent):
+        """Handle waist button group clicks (step distance commands)."""
+        if self._cleaned_up or self.ros2_interface is None:
+            return
 
-    def _on_waist_down_click(self):
-        scale = self._waist_lifting_slider.value if self._waist_lifting_slider is not None else 0.0
-        self.ros2_interface.send_waist_lifting_relative_position(-scale)
+        label = event.target.value
+        distance = self._waist_lifting_slider.value if self._waist_lifting_slider is not None else 0.0
+
+        if label == self._waist_label_step_up:
+            self.ros2_interface.send_waist_lifting_relative_position(distance)
+        elif label == self._waist_label_step_down:
+            self.ros2_interface.send_waist_lifting_relative_position(-distance)
+
+    def _get_waist_velocity_scale(self, direction: float) -> float:
+        speed = self._waist_speed_slider.value if self._waist_speed_slider is not None else 0.3
+        return max(-1.0, min(1.0, direction * speed))
+
+    def _get_waist_turn_velocity_scale(self, direction: float) -> float:
+        speed = (
+            self._waist_turn_speed_slider.value
+            if self._waist_turn_speed_slider is not None
+            else 0.3
+        )
+        return max(-1.0, min(1.0, direction * speed))
+
+    def _on_waist_hold_tick(self, direction: float):
+        """Called repeatedly while a lift hold button is pressed (on_hold)."""
+        if self._cleaned_up or not self._waist_command_enabled or self.ros2_interface is None:
+            return
+
+        self._stop_waist_turning_velocity()
+        self._waist_last_hold_callback_time = time.time()
+        self._waist_hold_active = True
+        try:
+            self.ros2_interface.send_waist_lifting_velocity_scale(
+                self._get_waist_velocity_scale(direction)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send waist lifting velocity: {e}")
+
+    def _on_waist_turn_hold_tick(self, direction: float):
+        """Called repeatedly while a turn hold button is pressed (on_hold)."""
+        if (
+            self._cleaned_up
+            or not self._waist_turning_command_enabled
+            or self.ros2_interface is None
+        ):
+            return
+
+        self._stop_waist_velocity()
+        self._waist_turn_last_hold_callback_time = time.time()
+        self._waist_turn_hold_active = True
+        try:
+            self.ros2_interface.send_waist_turning_velocity_scale(
+                self._get_waist_turn_velocity_scale(direction)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send waist turning velocity: {e}")
+
+    def _stop_waist_velocity(self):
+        """Stop continuous waist lifting (velocity command)."""
+        if not self._waist_command_enabled or self.ros2_interface is None:
+            self._waist_hold_active = False
+            return
+        try:
+            self.ros2_interface.send_waist_lifting_velocity_scale(0.0)
+        except Exception as e:
+            logger.debug(f"Failed to stop waist lifting velocity: {e}")
+        self._waist_hold_active = False
+
+    def _stop_waist_turning_velocity(self):
+        """Stop continuous waist turning (velocity command)."""
+        if not self._waist_turning_command_enabled or self.ros2_interface is None:
+            self._waist_turn_hold_active = False
+            return
+        try:
+            self.ros2_interface.send_waist_turning_velocity_scale(0.0)
+        except Exception as e:
+            logger.debug(f"Failed to stop waist turning velocity: {e}")
+        self._waist_turn_hold_active = False
+
+    def _update_waist_hold_release(self):
+        """Detect button release after on_hold callbacks stop."""
+        now = time.time()
+        if self._waist_hold_active:
+            if now - self._waist_last_hold_callback_time > self._waist_hold_release_timeout_s:
+                self._stop_waist_velocity()
+        if self._waist_turn_hold_active:
+            if (
+                now - self._waist_turn_last_hold_callback_time
+                > self._waist_hold_release_timeout_s
+            ):
+                self._stop_waist_turning_velocity()
 
     def _update_waist_visibility(self):
         if self._waist_folder is None:
@@ -1034,17 +1236,10 @@ class JointPanel:
             self._current_category == "body"
             and self._is_joint_control_enabled
             and self._joints_initialized
+            and self._waist_enabled
         )
 
-        # Only send stop command when transitioning from visible -> hidden
-        if self._waist_visible_last and not visible and self.ros2_interface is not None:
-            try:
-                self.ros2_interface.send_waist_lifting_relative_position(0.0)
-            except Exception:
-                pass
-
         self._waist_folder.visible = visible
-        self._waist_visible_last = visible
 
     def update(self):
         """Update Joint panel visibility and state.
@@ -1117,6 +1312,7 @@ class JointPanel:
                     pass
             
             self._update_waist_visibility()
+            self._update_waist_hold_release()
 
         except Exception as e:
             logger.warning(f"Failed to update Joint panel: {e}")
@@ -1219,11 +1415,19 @@ class JointPanel:
         self._send_button = None
         # Clear waist UI references
         self._waist_enabled = False
+        self._waist_command_enabled = False
+        self._waist_turning_command_enabled = False
         self._waist_folder = None
         self._waist_lifting_slider = None
-        self._waist_up_button = None
-        self._waist_down_button = None
-        self._waist_visible_last = False
+        self._waist_speed_slider = None
+        self._waist_turn_speed_slider = None
+        self._waist_action_group = None
+        self._waist_hold_up_button = None
+        self._waist_hold_down_button = None
+        self._waist_hold_turn_left_button = None
+        self._waist_hold_turn_right_button = None
+        self._waist_hold_active = False
+        self._waist_turn_hold_active = False
         self._joint_controls.clear()
         self._left_arm_controls.clear()
         self._right_arm_controls.clear()

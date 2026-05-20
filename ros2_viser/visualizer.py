@@ -476,6 +476,25 @@ class ROS2ViserVisualizer:
         except Exception as e:
             logger.error(f"Failed to reinitialize panels: {e}", exc_info=True)
     
+    def _reconnect_marker_gui_controls(self):
+        """Reconnect marker manager to FSM panel GUI after controls were recreated."""
+        if (
+            not self.config.enable_end_effector_marker
+            or self._marker_manager is None
+            or self._fsm_panel is None
+        ):
+            return
+
+        marker_dropdown, marker_button = self._fsm_panel.get_marker_controls()
+        if marker_dropdown is None or marker_button is None:
+            return
+
+        self._marker_manager.set_gui_controls(marker_dropdown, marker_button)
+        self._fsm_panel.set_marker_callbacks(
+            lambda _: self._on_marker_publish_mode_changed(marker_dropdown.value),
+            lambda _: self._on_send_marker_pose_clicked(),
+        )
+
     def _reinitialize_panels_with_language(self):
         """Update panel GUI labels with new language without destroying subscriptions.
         
@@ -500,6 +519,7 @@ class ROS2ViserVisualizer:
             # Update panel GUI labels (preserving subscriptions and state)
             if self.config.enable_fsm_panel:
                 self._fsm_panel.update_gui_labels()
+                self._reconnect_marker_gui_controls()
             
             if self.config.enable_gripper_panel:
                 self._gripper_panel.update_gui_labels()

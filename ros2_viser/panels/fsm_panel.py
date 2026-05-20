@@ -62,6 +62,8 @@ class FSMPanel:
         # End-effector marker controls (only visible in OCS2 mode)
         self._marker_publish_mode_dropdown: Optional[viser.GuiDropdownHandle] = None
         self._send_marker_pose_button: Optional[viser.GuiButtonHandle] = None
+        self._marker_mode_callback = None
+        self._marker_send_callback = None
         # Folder handle for cleanup
         self._folder_handle: Optional[viser.GuiFolderHandle] = None
         
@@ -144,25 +146,7 @@ class FSMPanel:
                     color=(255, 100, 0)
                 )
                 self._fsm_switch_pose_button.on_click(self._on_switch_pose_clicked)
-                
-                # End-effector marker controls (only if markers are enabled)
-                # These controls are only visible in OCS2 mode
-                if self.config is not None and self.config.enable_end_effector_marker:
-                    self._marker_publish_mode_dropdown = self.server.gui.add_dropdown(
-                        self.translator("marker_publish_mode"),
-                        options=[self.translator("continuous_publish"), self.translator("single_publish")],
-                        initial_value=self.translator("continuous_publish") if self.config.marker_continuous_publish else self.translator("single_publish")
-                    )
-             
-                    self._marker_publish_mode_dropdown.visible = False
-                    
-                    # Send button for single-shot mode (initially hidden)
-                    self._send_marker_pose_button = self.server.gui.add_button(
-                        self.translator("send_marker_pose"),
-                        color="green"
-                    )
-       
-                    self._send_marker_pose_button.visible = False
+                self._create_marker_controls()
                 
         except Exception as e:
             logger.error(f"Failed to initialize FSM panel GUI: {e}", exc_info=True)
@@ -240,6 +224,42 @@ class FSMPanel:
         }
         return state_map.get(state, f"UNKNOWN({state})")
     
+    def _create_marker_controls(self):
+        """Create end-effector marker publish-mode dropdown and send button (OCS2 only)."""
+        self._marker_publish_mode_dropdown = None
+        self._send_marker_pose_button = None
+
+        if self.config is None or not self.config.enable_end_effector_marker:
+            return
+
+        self._marker_publish_mode_dropdown = self.server.gui.add_dropdown(
+            self.translator("marker_publish_mode"),
+            options=[
+                self.translator("continuous_publish"),
+                self.translator("single_publish"),
+            ],
+            initial_value=(
+                self.translator("continuous_publish")
+                if self.config.marker_continuous_publish
+                else self.translator("single_publish")
+            ),
+        )
+        self._marker_publish_mode_dropdown.visible = False
+
+        self._send_marker_pose_button = self.server.gui.add_button(
+            self.translator("send_marker_pose"),
+            color="green",
+        )
+        self._send_marker_pose_button.visible = False
+        self._apply_marker_callbacks()
+
+    def _apply_marker_callbacks(self):
+        """Re-bind stored callbacks to marker GUI controls."""
+        if self._marker_mode_callback is not None and self._marker_publish_mode_dropdown is not None:
+            self._marker_publish_mode_dropdown.on_update(self._marker_mode_callback)
+        if self._marker_send_callback is not None and self._send_marker_pose_button is not None:
+            self._send_marker_pose_button.on_click(self._marker_send_callback)
+
     def set_marker_callbacks(self, on_mode_changed, on_send_clicked):
         """Set callbacks for marker controls.
         
@@ -247,10 +267,9 @@ class FSMPanel:
             on_mode_changed: Callback function for publish mode dropdown change
             on_send_clicked: Callback function for send button click
         """
-        if self._marker_publish_mode_dropdown is not None:
-            self._marker_publish_mode_dropdown.on_update(on_mode_changed)
-        if self._send_marker_pose_button is not None:
-            self._send_marker_pose_button.on_click(on_send_clicked)
+        self._marker_mode_callback = on_mode_changed
+        self._marker_send_callback = on_send_clicked
+        self._apply_marker_callbacks()
     
     def get_marker_controls(self):
         """Get marker control handles for connection to marker manager.
@@ -349,6 +368,7 @@ class FSMPanel:
                     color=(255, 100, 0)
                 )
                 self._fsm_switch_pose_button.on_click(self._on_switch_pose_clicked)
+                self._create_marker_controls()
             
             # Remove old folder
             try:
@@ -356,6 +376,7 @@ class FSMPanel:
             except Exception as e:
                 logger.debug(f"Could not remove old folder: {e}")
             
+            # Force visibility refresh (marker controls recreated above)
             self._current_fsm_state = 0
             self.update()
             

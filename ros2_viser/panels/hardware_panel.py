@@ -7,7 +7,7 @@ import viser
 
 from ros2_robot_interface import ROS2RobotInterface
 
-from ..i18n import get_translator
+from ..i18n import get_text_in_language, get_translator
 from ..modal_dialog import M6CCSConfigDialog
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,23 @@ class HardwarePanel:
             logger.error(f"Failed to initialize Hardware panel: {e}", exc_info=True)
             raise
     
+    def _get_default_status_text(self) -> str:
+        """Build default hardware detection status for the current language."""
+        status_text = self.translator("hardware_system_detected")
+        if self.has_m6_ccs_system:
+            status_text += f" ({self.translator('m6_ccs_system_detected')})"
+        return status_text
+
+    def _is_default_status_text(self, value: str) -> bool:
+        """True if value is the default detection message in any supported language."""
+        for lang in ("zh", "en"):
+            text = get_text_in_language(lang, "hardware_system_detected")
+            if self.has_m6_ccs_system:
+                text += f" ({get_text_in_language(lang, 'm6_ccs_system_detected')})"
+            if value == text:
+                return True
+        return False
+
     def _init_gui(self):
         """Initialize Hardware control panel GUI elements."""
         if self.server is None:
@@ -90,9 +107,7 @@ class HardwarePanel:
             self._folder_handle = self.server.gui.add_folder(self.translator("hardware_control"))
             with self._folder_handle:
                 # Status display
-                status_text = self.translator("hardware_system_detected")
-                if self.has_m6_ccs_system:
-                    status_text += f" ({self.translator('m6_ccs_system_detected')})"
+                status_text = self._get_default_status_text()
                 
                 self._status_text = self.server.gui.add_text(
                     self.translator("status"),
@@ -217,12 +232,13 @@ class HardwarePanel:
             # Recreate GUI elements in new folder
             with self._folder_handle:
                 # Status display
-                status_text = self.translator("hardware_system_detected")
-                if self.has_m6_ccs_system:
-                    status_text += f" ({self.translator('m6_ccs_system_detected')})"
+                status_text = self._get_default_status_text()
                 
-                # Use current value if available, otherwise use default
-                status_value = current_status_value if current_status_value else status_text
+                # Refresh default detection message on language change; keep custom config feedback
+                if current_status_value and not self._is_default_status_text(current_status_value):
+                    status_value = current_status_value
+                else:
+                    status_value = status_text
                 
                 self._status_text = self.server.gui.add_text(
                     self.translator("status"),
