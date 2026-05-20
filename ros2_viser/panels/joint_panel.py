@@ -257,6 +257,51 @@ class JointPanel:
                                 pass  # Ignore errors during update
         except Exception as e:
             logger.error(f"Error updating joint state from interface: {e}", exc_info=True)
+
+    def _refresh_current_category_joint_positions_once(self):
+        """Refresh cached positions for the selected category before rebuilding controls.
+
+        Normal updates intentionally avoid overwriting sliders while joint control is
+        enabled. Category switches are different: newly created sliders should start
+        from the robot's latest reported value instead of an old cached value.
+        """
+        if (
+            self._cleaned_up
+            or self.ros2_interface is None
+            or not self._joints_initialized
+            or not self._current_category
+        ):
+            return
+
+        try:
+            categorized_joint_state = self.ros2_interface.get_joint_state(categorized=True)
+            if categorized_joint_state is None:
+                return
+
+            category_mapping = {
+                'head': 'head',
+                'body': 'body',
+                'left_arm': 'left',
+                'right_arm': 'right',
+                'left_gripper': 'left_hand',
+                'right_gripper': 'right_hand',
+                'arm': 'left',
+                'gripper': 'left_hand',
+            }
+
+            for ros2_category, joint_data in categorized_joint_state.items():
+                if ros2_category == 'timestamp':
+                    continue
+                if category_mapping.get(ros2_category) != self._current_category:
+                    continue
+
+                names = joint_data.get('names', [])
+                positions = joint_data.get('positions', [])
+                for i, name in enumerate(names):
+                    if name in self._joint_positions and i < len(positions):
+                        self._joint_positions[name] = positions[i]
+        except Exception as e:
+            logger.debug(f"Could not refresh current category joint positions: {e}")
     
     def _update_target_poses_from_interface(self):
         """Update left/right target poses from ros2_interface (called from update loop, not callback).
@@ -458,6 +503,7 @@ class JointPanel:
             if label in self._category_dropdown.options:
                 self._category_dropdown.value = label
 
+        self._refresh_current_category_joint_positions_once()
         self._rebuild_joint_controls()
 
     def set_urdf(self, urdf: Any) -> None:
