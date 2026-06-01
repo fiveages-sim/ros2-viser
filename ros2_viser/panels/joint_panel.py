@@ -73,10 +73,17 @@ class JointPanel:
         self._waist_enabled: bool = False
         self._waist_command_enabled: bool = False
         self._waist_turning_command_enabled: bool = False
+        self._waist_pose_relative_enabled: bool = False
+        self._waist_pose_absolute_enabled: bool = False
         self._waist_folder = None
         self._waist_lifting_slider = None
         self._waist_speed_slider = None
         self._waist_turn_speed_slider = None
+        self._waist_pose_x_slider = None
+        self._waist_pose_z_slider = None
+        self._waist_pose_phi_slider = None
+        self._waist_pose_relative_button = None
+        self._waist_pose_absolute_button = None
         self._waist_action_group = None
         self._waist_hold_up_button = None
         self._waist_hold_down_button = None
@@ -720,6 +727,12 @@ class JointPanel:
         self._waist_turning_command_enabled = (
             getattr(self.ros2_interface, "waist_turning_command_pub", None) is not None
         )
+        self._waist_pose_relative_enabled = (
+            getattr(self.ros2_interface, "waist_lifting_pose_relative_pub", None) is not None
+        )
+        self._waist_pose_absolute_enabled = (
+            getattr(self.ros2_interface, "waist_lifting_pose_absolute_pub", None) is not None
+        )
 
         try:
             params = self.ros2_interface.list_node_parameters("/body_joint_controller")
@@ -729,10 +742,12 @@ class JointPanel:
                     enabled = param['value']
             self._waist_enabled = enabled
             logger.info(
-                "Waist control enabled=%s, lift command=%s, turn command=%s",
+                "Waist control enabled=%s, lift command=%s, turn command=%s, pose relative=%s, pose absolute=%s",
                 self._waist_enabled,
                 self._waist_command_enabled,
                 self._waist_turning_command_enabled,
+                self._waist_pose_relative_enabled,
+                self._waist_pose_absolute_enabled,
             )
         except Exception as e:
             logger.warning(f"Failed to query waist_lifting_enabled from /body_joint_controller: {e}")
@@ -758,6 +773,11 @@ class JointPanel:
         self._waist_lifting_slider = None
         self._waist_speed_slider = None
         self._waist_turn_speed_slider = None
+        self._waist_pose_x_slider = None
+        self._waist_pose_z_slider = None
+        self._waist_pose_phi_slider = None
+        self._waist_pose_relative_button = None
+        self._waist_pose_absolute_button = None
         self._waist_action_group = None
         self._waist_hold_up_button = None
         self._waist_hold_down_button = None
@@ -784,6 +804,47 @@ class JointPanel:
                 step=0.01,
                 initial_value=0.1,
             )
+
+            if self._waist_pose_relative_enabled or self._waist_pose_absolute_enabled:
+                self._waist_pose_x_slider = self.server.gui.add_slider(
+                    self.translator("waist_pose_x"),
+                    min=-0.5,
+                    max=0.5,
+                    step=0.01,
+                    initial_value=0.0,
+                )
+                self._waist_pose_z_slider = self.server.gui.add_slider(
+                    self.translator("waist_pose_z"),
+                    min=-0.5,
+                    max=1.2,
+                    step=0.01,
+                    initial_value=0.0,
+                )
+                self._waist_pose_phi_slider = self.server.gui.add_slider(
+                    self.translator("waist_pose_phi"),
+                    min=-3.14,
+                    max=3.14,
+                    step=0.01,
+                    initial_value=0.0,
+                )
+
+            if self._waist_pose_relative_enabled:
+                self._waist_pose_relative_button = self.server.gui.add_button(
+                    self.translator("waist_send_pose_relative"),
+                    color="green",
+                )
+                self._waist_pose_relative_button.on_click(
+                    self._on_waist_pose_relative_clicked
+                )
+
+            if self._waist_pose_absolute_enabled:
+                self._waist_pose_absolute_button = self.server.gui.add_button(
+                    self.translator("waist_send_pose_absolute"),
+                    color="blue",
+                )
+                self._waist_pose_absolute_button.on_click(
+                    self._on_waist_pose_absolute_clicked
+                )
 
             if self._waist_command_enabled:
                 self._waist_speed_slider = self.server.gui.add_slider(
@@ -1193,6 +1254,42 @@ class JointPanel:
         elif label == self._waist_label_step_down:
             self.ros2_interface.send_waist_lifting_relative_position(-distance)
 
+    def _get_waist_pose_values(self) -> tuple[float, float, float]:
+        x = self._waist_pose_x_slider.value if self._waist_pose_x_slider is not None else 0.0
+        z = self._waist_pose_z_slider.value if self._waist_pose_z_slider is not None else 0.0
+        phi = self._waist_pose_phi_slider.value if self._waist_pose_phi_slider is not None else 0.0
+        return x, z, phi
+
+    def _on_waist_pose_relative_clicked(self, _):
+        """Handle waist x/z/phi relative pose command."""
+        if (
+            self._cleaned_up
+            or not self._waist_pose_relative_enabled
+            or self.ros2_interface is None
+        ):
+            return
+
+        try:
+            x, z, phi = self._get_waist_pose_values()
+            self.ros2_interface.send_waist_lifting_pose_relative(x, z, phi)
+        except Exception as e:
+            logger.warning(f"Failed to send waist relative pose: {e}")
+
+    def _on_waist_pose_absolute_clicked(self, _):
+        """Handle waist x/z/phi absolute pose command."""
+        if (
+            self._cleaned_up
+            or not self._waist_pose_absolute_enabled
+            or self.ros2_interface is None
+        ):
+            return
+
+        try:
+            x, z, phi = self._get_waist_pose_values()
+            self.ros2_interface.send_waist_lifting_pose_absolute(x, z, phi)
+        except Exception as e:
+            logger.warning(f"Failed to send waist absolute pose: {e}")
+
     def _get_waist_velocity_scale(self, direction: float) -> float:
         speed = self._waist_speed_slider.value if self._waist_speed_slider is not None else 0.3
         return max(-1.0, min(1.0, direction * speed))
@@ -1463,6 +1560,13 @@ class JointPanel:
         self._waist_enabled = False
         self._waist_command_enabled = False
         self._waist_turning_command_enabled = False
+        self._waist_pose_relative_enabled = False
+        self._waist_pose_absolute_enabled = False
+        self._waist_pose_x_slider = None
+        self._waist_pose_z_slider = None
+        self._waist_pose_phi_slider = None
+        self._waist_pose_relative_button = None
+        self._waist_pose_absolute_button = None
         self._waist_folder = None
         self._waist_lifting_slider = None
         self._waist_speed_slider = None

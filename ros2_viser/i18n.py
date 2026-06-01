@@ -63,6 +63,11 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         # Waist control (lift + turn)
         "waist_control": "腰部控制",
         "waist_lifting_distance": "升降距离（米）",
+        "waist_pose_x": "腰部 X（米）",
+        "waist_pose_z": "腰部 Z（米）",
+        "waist_pose_phi": "腰部 Phi（rad）",
+        "waist_send_pose_relative": "发送相对 x/z/phi",
+        "waist_send_pose_absolute": "发送绝对 x/z/phi",
         "waist_lifting_ratio": "升降速度比",
         "waist_actions": "腰部操作",
         "waist_step_up": "上升(距离)",
@@ -180,6 +185,11 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         # Waist control (lift + turn)
         "waist_control": "Waist Control",
         "waist_lifting_distance": "Step Distance (m)",
+        "waist_pose_x": "Waist X (m)",
+        "waist_pose_z": "Waist Z (m)",
+        "waist_pose_phi": "Waist Phi (rad)",
+        "waist_send_pose_relative": "Send Relative x/z/phi",
+        "waist_send_pose_absolute": "Send Absolute x/z/phi",
         "waist_lifting_ratio": "Lift Speed Ratio",
         "waist_actions": "Waist Actions",
         "waist_step_up": "Up (step)",
