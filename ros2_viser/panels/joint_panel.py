@@ -927,7 +927,18 @@ class JointPanel:
             target_pose = handler.get_target_pose()
         except Exception as e:
             logger.debug(f"Could not get {side} arm target pose for control init: {e}")
-            return initial_values
+            target_pose = None
+
+        # When Viser starts while the robot is already in OCS2 mode, the
+        # current_target topic may not have arrived yet. The marker is initialized
+        # from the current end-effector pose in that case, so use the same fallback
+        # here to keep the sliders synchronized with the visible marker.
+        if target_pose is None:
+            try:
+                target_pose = handler.get_pose()
+            except Exception as e:
+                logger.debug(f"Could not get {side} arm current pose for control init: {e}")
+                target_pose = None
 
         if target_pose is None:
             return initial_values
