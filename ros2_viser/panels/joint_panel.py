@@ -259,12 +259,7 @@ class JointPanel:
             logger.error(f"Error updating joint state from interface: {e}", exc_info=True)
 
     def _refresh_current_category_joint_positions_once(self):
-        """Refresh cached positions for the selected category before rebuilding controls.
-
-        Normal updates intentionally avoid overwriting sliders while joint control is
-        enabled. Category switches are different: newly created sliders should start
-        from the robot's latest reported value instead of an old cached value.
-        """
+        """Refresh cached positions for the selected category before rebuilding controls."""
         if (
             self._cleaned_up
             or self.ros2_interface is None
@@ -913,6 +908,65 @@ class JointPanel:
         
         # Update category dropdown options
         self._update_category_options()
+
+    def _get_pose_control_initial_values(self, side: str) -> List[float]:
+        """Get current target pose values for OCS2 pose controls."""
+        initial_values = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        if self.ros2_interface is None:
+            return initial_values
+
+        handler = (
+            self.ros2_interface.left_arm_handler
+            if side == "left"
+            else self.ros2_interface.right_arm_handler
+        )
+        if handler is None:
+            return initial_values
+
+        try:
+            target_pose = handler.get_target_pose()
+        except Exception as e:
+            logger.debug(f"Could not get {side} arm target pose for control init: {e}")
+            target_pose = None
+
+        # When Viser starts while the robot is already in OCS2 mode, the
+        # current_target topic may not have arrived yet. The marker is initialized
+        # from the current end-effector pose in that case, so use the same fallback
+        # here to keep the sliders synchronized with the visible marker.
+        if target_pose is None:
+            try:
+                target_pose = handler.get_pose()
+            except Exception as e:
+                logger.debug(f"Could not get {side} arm current pose for control init: {e}")
+                target_pose = None
+
+        if target_pose is None:
+            return initial_values
+
+        current_pose = {
+            'x': target_pose.position.x,
+            'y': target_pose.position.y,
+            'z': target_pose.position.z,
+            'qx': target_pose.orientation.x,
+            'qy': target_pose.orientation.y,
+            'qz': target_pose.orientation.z,
+            'qw': target_pose.orientation.w,
+        }
+
+        if side == "left":
+            self._last_left_target_pose = current_pose.copy()
+        else:
+            self._last_right_target_pose = current_pose.copy()
+
+        return [
+            current_pose['x'],
+            current_pose['y'],
+            current_pose['z'],
+            current_pose['qx'],
+            current_pose['qy'],
+            current_pose['qz'],
+            current_pose['qw'],
+        ]
     
     def _create_left_arm_pose_controls(self):
         """Create pose controls for left arm (OCS2 mode)."""
@@ -921,7 +975,7 @@ class JointPanel:
         
         param_names = ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw']
         labels = ['X (m)', 'Y (m)', 'Z (m)', 'QX', 'QY', 'QZ', 'QW']
-        initial_values = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        initial_values = self._get_pose_control_initial_values("left")
         ranges = [(-2.0, 2.0), (-2.0, 2.0), (-2.0, 2.0),
                   (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
         
@@ -945,7 +999,7 @@ class JointPanel:
         
         param_names = ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw']
         labels = ['X (m)', 'Y (m)', 'Z (m)', 'QX', 'QY', 'QZ', 'QW']
-        initial_values = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        initial_values = self._get_pose_control_initial_values("right")
         ranges = [(-2.0, 2.0), (-2.0, 2.0), (-2.0, 2.0),
                   (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
         
@@ -1303,6 +1357,14 @@ class JointPanel:
             # This ensures joints are initialized even if FSM state doesn't change
             if fsm_state_changed or not self._joints_initialized:
                 self._update_joint_state_from_interface()
+
+            # Left/right arm controls depend on the FSM mode:
+            # OCS2 shows end-effector pose controls, MOVEJ shows joint sliders.
+            # When the mode changes after joints are already initialized, rebuild
+            # the active category so the UI switches between those control types.
+            if fsm_state_changed and self._joints_initialized:
+                self._refresh_current_category_joint_positions_once()
+                self._rebuild_joint_controls()
             
             # Update target poses from interface (for OCS2 mode)
             self._update_target_poses_from_interface()
