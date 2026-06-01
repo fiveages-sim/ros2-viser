@@ -1346,6 +1346,14 @@ class JointPanel:
             # This ensures joints are initialized even if FSM state doesn't change
             if fsm_state_changed or not self._joints_initialized:
                 self._update_joint_state_from_interface()
+
+            # Left/right arm controls depend on the FSM mode:
+            # OCS2 shows end-effector pose controls, MOVEJ shows joint sliders.
+            # When the mode changes after joints are already initialized, rebuild
+            # the active category so the UI switches between those control types.
+            if fsm_state_changed and self._joints_initialized:
+                self._refresh_current_category_joint_positions_once()
+                self._rebuild_joint_controls()
             
             # Update target poses from interface (for OCS2 mode)
             self._update_target_poses_from_interface()
