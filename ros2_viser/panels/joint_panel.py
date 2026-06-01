@@ -772,6 +772,7 @@ class JointPanel:
 
         # Reset handles
         self._waist_folder = None
+        self._body_link3_pose_html = None
         self._waist_lifting_slider = None
         self._waist_speed_slider = None
         self._waist_turn_speed_slider = None
@@ -829,6 +830,11 @@ class JointPanel:
                     step=0.01,
                     initial_value=0.0,
                 )
+
+            self._create_body_link3_pose_display(
+                parent=self._waist_folder,
+                enter_context=False,
+            )
 
             if self._waist_pose_relative_enabled:
                 self._waist_pose_relative_button = self.server.gui.add_button(
@@ -947,13 +953,6 @@ class JointPanel:
                 pass
             self._send_button = None
 
-        if self._body_link3_pose_html is not None:
-            try:
-                self._body_link3_pose_html.remove()
-            except Exception:
-                pass
-            self._body_link3_pose_html = None
-        
         # Get joints for current category
         current_state = self._current_fsm_state
         
@@ -972,7 +971,7 @@ class JointPanel:
             for joint_name in joints_to_show:
                 self._create_joint_control(joint_name)
 
-        if self._current_category == "body":
+        if self._current_category == "body" and self._body_link3_pose_html is None:
             self._create_body_link3_pose_display()
         
         # Create send button at the bottom (after all controls)
@@ -987,12 +986,25 @@ class JointPanel:
         # Update category dropdown options
         self._update_category_options()
 
-    def _create_body_link3_pose_display(self):
+    def _create_body_link3_pose_display(
+        self,
+        parent: Optional[Any] = None,
+        enter_context: bool = True,
+    ):
         """Create a read-only display for body_link3 pose in base_footprint."""
-        if self._folder_handle is None:
+        container = parent or self._folder_handle
+        if container is None:
             return
 
-        with self._folder_handle:
+        if enter_context:
+            with container:
+                self._body_link3_pose_html = self.server.gui.add_html(
+                    self._format_body_link3_message(
+                        self.translator("body_link3_pose"),
+                        self.translator("body_link3_pose_waiting")
+                    )
+                )
+        else:
             self._body_link3_pose_html = self.server.gui.add_html(
                 self._format_body_link3_message(
                     self.translator("body_link3_pose"),
