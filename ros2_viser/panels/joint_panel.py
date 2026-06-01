@@ -1,6 +1,7 @@
 """Joint Control Panel for ROS2 Viser."""
 
 import logging
+import math
 import time
 from typing import Optional, Dict, List, Any
 from io import StringIO
@@ -68,6 +69,7 @@ class JointPanel:
         self._category_dropdown: Optional[viser.GuiDropdownHandle] = None
         self._status_text: Optional[viser.GuiTextHandle] = None
         self._send_button: Optional[viser.GuiButtonHandle] = None
+        self._body_link3_pose_html: Optional[viser.GuiHtmlHandle] = None
 
         # Waist control UI handles
         self._waist_enabled: bool = False
@@ -944,6 +946,13 @@ class JointPanel:
             except Exception:
                 pass
             self._send_button = None
+
+        if self._body_link3_pose_html is not None:
+            try:
+                self._body_link3_pose_html.remove()
+            except Exception:
+                pass
+            self._body_link3_pose_html = None
         
         # Get joints for current category
         current_state = self._current_fsm_state
@@ -962,6 +971,9 @@ class JointPanel:
             # Create joint sliders (for all categories including left/right in MOVEJ mode)
             for joint_name in joints_to_show:
                 self._create_joint_control(joint_name)
+
+        if self._current_category == "body":
+            self._create_body_link3_pose_display()
         
         # Create send button at the bottom (after all controls)
         if self._folder_handle is not None:
@@ -974,6 +986,19 @@ class JointPanel:
         
         # Update category dropdown options
         self._update_category_options()
+
+    def _create_body_link3_pose_display(self):
+        """Create a read-only display for body_link3 pose in base_footprint."""
+        if self._folder_handle is None:
+            return
+
+        with self._folder_handle:
+            self._body_link3_pose_html = self.server.gui.add_html(
+                self._format_body_link3_message(
+                    self.translator("body_link3_pose"),
+                    self.translator("body_link3_pose_waiting")
+                )
+            )
     
     def _create_left_arm_pose_controls(self):
         """Create pose controls for left arm (OCS2 mode)."""
@@ -1384,6 +1409,89 @@ class JointPanel:
 
         self._waist_folder.visible = visible
 
+    @staticmethod
+    def _format_body_link3_pose(
+        transform,
+        title: str = "body_link3 @ base_footprint",
+    ) -> str:
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        sinp = 2.0 * (rotation.w * rotation.y - rotation.z * rotation.x)
+        phi = math.asin(max(-1.0, min(1.0, sinp)))
+        return (
+            '<div style="font-family:SimHei,\'Microsoft YaHei\',Arial,sans-serif;'
+            'font-weight:700;font-size:12px;line-height:1.2;color:#111;'
+            'margin-top:6px;">'
+            '<div style="margin-bottom:4px;text-align:center;color:#6b7280;'
+            f'font-weight:600;">{title}</div>'
+            '<div style="display:grid;grid-template-columns:repeat(3,1fr);'
+            'gap:4px;text-align:center;">'
+            f"{JointPanel._format_body_link3_cell('x', translation.x)}"
+            f"{JointPanel._format_body_link3_cell('z', translation.z)}"
+            f"{JointPanel._format_body_link3_cell('phi', phi)}"
+            "</div>"
+            "</div>"
+        )
+
+    @staticmethod
+    def _format_body_link3_cell(label: str, value: float) -> str:
+        return (
+            '<div style="padding:2px 3px;">'
+            f'<span style="display:block;font-size:11px;">{label}</span>'
+            f'<span style="display:block;">{value:+.3f}</span>'
+            "</div>"
+        )
+
+    @staticmethod
+    def _format_body_link3_message(title: str, message: str) -> str:
+        return (
+            '<div style="font-family:SimHei,\'Microsoft YaHei\',Arial,sans-serif;'
+            'font-weight:700;font-size:12px;color:#111;margin-top:6px;">'
+            '<div style="margin-bottom:4px;text-align:center;color:#6b7280;'
+            f'font-weight:600;">{title}</div>'
+            f"{message}"
+            "</div>"
+        )
+
+    def _update_body_link3_pose_display(self):
+        """Update body_link3 pose text from TF."""
+        if self._body_link3_pose_html is None:
+            return
+        if self._cleaned_up or self.ros2_interface is None:
+            return
+
+        visible = (
+            self._current_category == "body"
+            and self._is_joint_control_enabled
+            and self._joints_initialized
+        )
+        self._body_link3_pose_html.visible = visible
+        if not visible:
+            return
+
+        try:
+            transform = self.ros2_interface.lookup_transform(
+                "base_footprint",
+                "body_link3",
+            )
+            if transform is None:
+                self._body_link3_pose_html.content = self._format_body_link3_message(
+                    self.translator("body_link3_pose"),
+                    self.translator("body_link3_pose_unavailable")
+                )
+                return
+
+            self._body_link3_pose_html.content = self._format_body_link3_pose(
+                transform,
+                self.translator("body_link3_pose"),
+            )
+        except Exception as e:
+            logger.debug(f"Failed to update body_link3 pose display: {e}")
+            self._body_link3_pose_html.content = self._format_body_link3_message(
+                self.translator("body_link3_pose"),
+                self.translator("body_link3_pose_unavailable")
+            )
+
     def update(self):
         """Update Joint panel visibility and state.
         
@@ -1455,6 +1563,7 @@ class JointPanel:
                     pass
             
             self._update_waist_visibility()
+            self._update_body_link3_pose_display()
             self._update_waist_hold_release()
 
         except Exception as e:
@@ -1556,6 +1665,7 @@ class JointPanel:
         self._category_dropdown = None
         self._status_text = None
         self._send_button = None
+        self._body_link3_pose_html = None
         # Clear waist UI references
         self._waist_enabled = False
         self._waist_command_enabled = False

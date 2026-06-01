@@ -59,6 +59,9 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "waiting_for_joints": "等待关节初始化",
         "switch_to_joint_control_state": "请切换到支持关节控制的状态 (OCS2 或 MOVEJ)",
         "ready": "就绪",
+        "body_link3_pose": "body_link3 @ base_footprint",
+        "body_link3_pose_waiting": "等待 TF",
+        "body_link3_pose_unavailable": "TF 不可用",
         
         # Waist control (lift + turn)
         "waist_control": "腰部控制",
@@ -181,6 +184,9 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "waiting_for_joints": "Waiting for joints initialization",
         "switch_to_joint_control_state": "Please switch to joint control state (OCS2 or MOVEJ)",
         "ready": "Ready",
+        "body_link3_pose": "body_link3 @ base_footprint",
+        "body_link3_pose_waiting": "Waiting for TF",
+        "body_link3_pose_unavailable": "TF unavailable",
         
         # Waist control (lift + turn)
         "waist_control": "Waist Control",
