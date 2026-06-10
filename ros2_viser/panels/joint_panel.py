@@ -812,8 +812,8 @@ class JointPanel:
                 )
                 self._waist_pose_phi_slider = self.server.gui.add_slider(
                     self.translator("waist_pose_phi"),
-                    min=-3.14,
-                    max=3.14,
+                    min=-1.3,
+                    max=1.3,
                     step=0.01,
                     initial_value=0.0,
                 )
