@@ -795,14 +795,6 @@ class JointPanel:
         self._waist_folder = self.server.gui.add_folder(self.translator("waist_control"))
 
         with self._waist_folder:
-            self._waist_lifting_slider = self.server.gui.add_slider(
-                self.translator("waist_lifting_distance"),
-                min=0.0,
-                max=0.5,
-                step=0.01,
-                initial_value=0.1,
-            )
-
             if self._waist_pose_relative_enabled or self._waist_pose_absolute_enabled:
                 self._waist_pose_x_slider = self.server.gui.add_slider(
                     self.translator("waist_pose_x"),
@@ -820,8 +812,8 @@ class JointPanel:
                 )
                 self._waist_pose_phi_slider = self.server.gui.add_slider(
                     self.translator("waist_pose_phi"),
-                    min=-3.14,
-                    max=3.14,
+                    min=-1.3,
+                    max=1.3,
                     step=0.01,
                     initial_value=0.0,
                 )
@@ -849,14 +841,13 @@ class JointPanel:
                     self._on_waist_pose_absolute_clicked
                 )
 
-            if self._waist_command_enabled:
-                self._waist_speed_slider = self.server.gui.add_slider(
-                    self.translator("waist_lifting_ratio"),
-                    min=0.05,
-                    max=1.0,
-                    step=0.05,
-                    initial_value=0.3,
-                )
+            self._waist_lifting_slider = self.server.gui.add_slider(
+                self.translator("waist_lifting_distance"),
+                min=0.0,
+                max=0.5,
+                step=0.01,
+                initial_value=0.1,
+            )
 
             self._waist_action_group = self.server.gui.add_button_group(
                 self.translator("waist_actions"),
@@ -867,6 +858,14 @@ class JointPanel:
             # Viser button_group only supports on_click (step). Hold uses on_hold on
             # companion buttons with matching labels (rendered below the group).
             if self._waist_command_enabled:
+                self._waist_speed_slider = self.server.gui.add_slider(
+                    self.translator("waist_lifting_ratio"),
+                    min=0.05,
+                    max=1.0,
+                    step=0.05,
+                    initial_value=0.3,
+                )
+
                 self._waist_hold_up_button = self.server.gui.add_button(
                     self._waist_label_hold_up,
                     color="green",
