@@ -259,7 +259,7 @@ class EndEffectorMarkerManager:
             self._last_marker_update_time = time.time()
             
             if self._marker_continuous_publish:
-                self._send_pose_command(arm, current_pose)
+                self._send_pose_command(arm, current_pose, use_stamped=False)
                 if arm == "left":
                     self._last_left_ee_pose = current_pose
                 else:
@@ -792,12 +792,14 @@ class EndEffectorMarkerManager:
         self._reset_single_marker_position("left")
         self._reset_single_marker_position("right")
     
-    def _send_pose_command(self, arm: str, pose_tuple: Tuple):
+    def _send_pose_command(self, arm: str, pose_tuple: Tuple, use_stamped: bool = True):
         """Send pose command for the specified arm.
         
         Args:
             arm: "left" or "right"
             pose_tuple: (position, wxyz) tuple
+            use_stamped: If True, publish PoseStamped to ``*/stamped``;
+                if False, publish Pose to ``/left_target`` or ``/right_target``.
         """
         if self.ros2_interface is None or not self.ros2_interface.is_connected:
             return
@@ -809,8 +811,11 @@ class EndEffectorMarkerManager:
                 logger.warning(f"{arm} arm handler not available")
                 return
             
-            frame_id = self._marker_base_frame or self._left_frame_id or "base_link"
-            handler.send_target_stamped(frame_id, pose)
+            if use_stamped:
+                frame_id = self._marker_base_frame or self._left_frame_id or "base_link"
+                handler.send_target_stamped(frame_id, pose)
+            else:
+                handler.send_target(pose)
         except Exception as e:
             logger.warning(f"Failed to send {arm} arm pose command: {e}")
     
