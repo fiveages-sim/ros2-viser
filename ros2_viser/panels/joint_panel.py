@@ -732,22 +732,44 @@ class JointPanel:
         )
 
         try:
-            params = self.ros2_interface.list_node_parameters("/body_joint_controller")
+            # Prefer discovered body controller node (split body_joint_controller or WBC).
+            body_node = getattr(self.ros2_interface, "body_controller", "") or ""
+            candidate_nodes = []
+            if body_node:
+                candidate_nodes.append(body_node if body_node.startswith("/") else f"/{body_node}")
+            # Fallbacks for older stacks / incomplete discovery
+            for fallback in ("/body_joint_controller", "/ocs2_wbc_controller"):
+                if fallback not in candidate_nodes:
+                    candidate_nodes.append(fallback)
+
             enabled = False
-            for param in params:
-                if param['name'] == "waist_lifting_enabled":
-                    enabled = param['value']
+            queried_node = None
+            for node_name in candidate_nodes:
+                try:
+                    params = self.ros2_interface.list_node_parameters(node_name)
+                except Exception:
+                    continue
+                for param in params:
+                    if param.get("name") == "waist_lifting_enabled":
+                        enabled = bool(param.get("value"))
+                        queried_node = node_name
+                        break
+                if queried_node is not None:
+                    break
+
             self._waist_enabled = enabled
             logger.info(
-                "Waist control enabled=%s, lift command=%s, turn command=%s, pose relative=%s, pose absolute=%s",
+                "Waist control enabled=%s (node=%s), lift command=%s, turn command=%s, "
+                "pose relative=%s, pose absolute=%s",
                 self._waist_enabled,
+                queried_node,
                 self._waist_command_enabled,
                 self._waist_turning_command_enabled,
                 self._waist_pose_relative_enabled,
                 self._waist_pose_absolute_enabled,
             )
         except Exception as e:
-            logger.warning(f"Failed to query waist_lifting_enabled from /body_joint_controller: {e}")
+            logger.warning(f"Failed to query waist_lifting_enabled: {e}")
             self._waist_enabled = False
 
     def _create_waist_controls(self):
