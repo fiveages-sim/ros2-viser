@@ -1362,9 +1362,9 @@ class JointPanel:
         distance = self._waist_lifting_slider.value if self._waist_lifting_slider is not None else 0.0
 
         if label == self._waist_label_step_up:
-            self.ros2_interface.send_waist_lifting_relative_position(distance)
+            self.ros2_interface.send_waist_lifting_pose_relative(0.0, distance, 0.0)
         elif label == self._waist_label_step_down:
-            self.ros2_interface.send_waist_lifting_relative_position(-distance)
+            self.ros2_interface.send_waist_lifting_pose_relative(0.0, -distance, 0.0)
 
     def _get_waist_pose_values(self) -> tuple[float, float, float]:
         x = self._waist_pose_x_slider.value if self._waist_pose_x_slider is not None else 0.0
