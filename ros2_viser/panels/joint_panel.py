@@ -934,7 +934,7 @@ class JointPanel:
                     color="blue",
                 )
                 self._waist_hold_turn_left_button.on_hold(callback_hz=10.0)(
-                    lambda _: self._on_waist_turn_hold_tick(-1.0)
+                    lambda _: self._on_waist_turn_hold_tick(1.0)
                 )
 
                 self._waist_hold_turn_right_button = self.server.gui.add_button(
@@ -942,7 +942,7 @@ class JointPanel:
                     color="blue",
                 )
                 self._waist_hold_turn_right_button.on_hold(callback_hz=10.0)(
-                    lambda _: self._on_waist_turn_hold_tick(1.0)
+                    lambda _: self._on_waist_turn_hold_tick(-1.0)
                 )
 
             if self._waist_phi_command_enabled:
