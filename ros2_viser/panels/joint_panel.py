@@ -75,12 +75,14 @@ class JointPanel:
         self._waist_enabled: bool = False
         self._waist_command_enabled: bool = False
         self._waist_turning_command_enabled: bool = False
+        self._waist_phi_command_enabled: bool = False
         self._waist_pose_relative_enabled: bool = False
         self._waist_pose_absolute_enabled: bool = False
         self._waist_folder = None
         self._waist_lifting_slider = None
         self._waist_speed_slider = None
         self._waist_turn_speed_slider = None
+        self._waist_phi_speed_slider = None
         self._waist_pose_x_slider = None
         self._waist_pose_z_slider = None
         self._waist_pose_phi_slider = None
@@ -90,11 +92,15 @@ class JointPanel:
         self._waist_hold_up_button = None
         self._waist_hold_down_button = None
         self._waist_hold_turn_left_button = None
+        self._waist_hold_phi_forward_button = None
         self._waist_hold_turn_right_button = None
+        self._waist_hold_phi_backward_button = None
         self._waist_hold_active: bool = False
         self._waist_turn_hold_active: bool = False
+        self._waist_phi_hold_active: bool = False
         self._waist_last_hold_callback_time: float = 0.0
         self._waist_turn_last_hold_callback_time: float = 0.0
+        self._waist_phi_last_hold_callback_time: float = 0.0
         self._waist_hold_release_timeout_s: float = 0.15
         # Cached button labels (for button_group / hold dispatch)
         self._waist_label_step_up: str = ""
@@ -724,6 +730,9 @@ class JointPanel:
         self._waist_turning_command_enabled = (
             getattr(self.ros2_interface, "waist_turning_command_pub", None) is not None
         )
+        self._waist_phi_command_enabled = (
+            getattr(self.ros2_interface, "waist_phi_command_pub", None) is not None
+        )
         self._waist_pose_relative_enabled = (
             getattr(self.ros2_interface, "waist_lifting_pose_relative_pub", None) is not None
         )
@@ -780,6 +789,9 @@ class JointPanel:
         if self._folder_handle is None:
             return
 
+        if self._waist_phi_hold_active:
+            self._stop_waist_phi_velocity()
+
         # Remove old waist UI first to avoid duplicates when rebuilding labels
         if self._waist_folder is not None:
             try:
@@ -793,6 +805,7 @@ class JointPanel:
         self._waist_lifting_slider = None
         self._waist_speed_slider = None
         self._waist_turn_speed_slider = None
+        self._waist_phi_speed_slider = None
         self._waist_pose_x_slider = None
         self._waist_pose_z_slider = None
         self._waist_pose_phi_slider = None
@@ -802,9 +815,12 @@ class JointPanel:
         self._waist_hold_up_button = None
         self._waist_hold_down_button = None
         self._waist_hold_turn_left_button = None
+        self._waist_hold_phi_forward_button = None
         self._waist_hold_turn_right_button = None
+        self._waist_hold_phi_backward_button = None
         self._waist_hold_active = False
         self._waist_turn_hold_active = False
+        self._waist_phi_hold_active = False
 
         self._waist_label_step_up = self.translator("waist_step_up")
         self._waist_label_step_down = self.translator("waist_step_down")
@@ -918,7 +934,7 @@ class JointPanel:
                     color="blue",
                 )
                 self._waist_hold_turn_left_button.on_hold(callback_hz=10.0)(
-                    lambda _: self._on_waist_turn_hold_tick(-1.0)
+                    lambda _: self._on_waist_turn_hold_tick(1.0)
                 )
 
                 self._waist_hold_turn_right_button = self.server.gui.add_button(
@@ -926,10 +942,35 @@ class JointPanel:
                     color="blue",
                 )
                 self._waist_hold_turn_right_button.on_hold(callback_hz=10.0)(
-                    lambda _: self._on_waist_turn_hold_tick(1.0)
+                    lambda _: self._on_waist_turn_hold_tick(-1.0)
                 )
 
-        self._waist_folder.visible = (self._current_category == "body")
+            if self._waist_phi_command_enabled:
+                self._waist_phi_speed_slider = self.server.gui.add_slider(
+                    self.translator("waist_phi_ratio"),
+                    min=0.0,
+                    max=1.0,
+                    step=0.01,
+                    initial_value=0.5,
+                )
+
+                self._waist_hold_phi_forward_button = self.server.gui.add_button(
+                    self.translator("waist_hold_phi_forward"),
+                    color="orange",
+                )
+                self._waist_hold_phi_forward_button.on_hold(callback_hz=10.0)(
+                    lambda _: self._on_waist_phi_hold_tick(1.0)
+                )
+
+                self._waist_hold_phi_backward_button = self.server.gui.add_button(
+                    self.translator("waist_hold_phi_backward"),
+                    color="orange",
+                )
+                self._waist_hold_phi_backward_button.on_hold(callback_hz=10.0)(
+                    lambda _: self._on_waist_phi_hold_tick(-1.0)
+                )
+
+        self._update_waist_visibility()
 
     def _rebuild_joint_controls(self):
         """Rebuild joint control GUI elements based on current category."""
@@ -1362,9 +1403,9 @@ class JointPanel:
         distance = self._waist_lifting_slider.value if self._waist_lifting_slider is not None else 0.0
 
         if label == self._waist_label_step_up:
-            self.ros2_interface.send_waist_lifting_relative_position(distance)
+            self.ros2_interface.send_waist_lifting_pose_relative(0.0, distance, 0.0)
         elif label == self._waist_label_step_down:
-            self.ros2_interface.send_waist_lifting_relative_position(-distance)
+            self.ros2_interface.send_waist_lifting_pose_relative(0.0, -distance, 0.0)
 
     def _get_waist_pose_values(self) -> tuple[float, float, float]:
         x = self._waist_pose_x_slider.value if self._waist_pose_x_slider is not None else 0.0
@@ -1414,11 +1455,20 @@ class JointPanel:
         )
         return max(-1.0, min(1.0, direction * speed))
 
+    def _get_waist_phi_velocity_scale(self, direction: float) -> float:
+        speed = (
+            self._waist_phi_speed_slider.value
+            if self._waist_phi_speed_slider is not None
+            else 0.5
+        )
+        return max(-1.0, min(1.0, direction * speed))
+
     def _on_waist_hold_tick(self, direction: float):
         """Called repeatedly while a lift hold button is pressed (on_hold)."""
         if self._cleaned_up or not self._waist_command_enabled or self.ros2_interface is None:
             return
 
+        self._stop_waist_phi_velocity()
         self._stop_waist_turning_velocity()
         self._waist_last_hold_callback_time = time.time()
         self._waist_hold_active = True
@@ -1438,6 +1488,7 @@ class JointPanel:
         ):
             return
 
+        self._stop_waist_phi_velocity()
         self._stop_waist_velocity()
         self._waist_turn_last_hold_callback_time = time.time()
         self._waist_turn_hold_active = True
@@ -1447,6 +1498,26 @@ class JointPanel:
             )
         except Exception as e:
             logger.warning(f"Failed to send waist turning velocity: {e}")
+
+    def _on_waist_phi_hold_tick(self, direction: float):
+        """Called repeatedly while a turn hold button is pressed (on_hold)."""
+        if (
+            self._cleaned_up
+            or not self._waist_phi_command_enabled
+            or self.ros2_interface is None
+        ):
+            return
+
+        self._stop_waist_velocity()
+        self._stop_waist_turning_velocity()
+        self._waist_phi_last_hold_callback_time = time.time()
+        self._waist_phi_hold_active = True
+        try:
+            self.ros2_interface.send_waist_phi_velocity_scale(
+                self._get_waist_phi_velocity_scale(direction)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send waist phi velocity: {e}")
 
     def _stop_waist_velocity(self):
         """Stop continuous waist lifting (velocity command)."""
@@ -1470,6 +1541,17 @@ class JointPanel:
             logger.debug(f"Failed to stop waist turning velocity: {e}")
         self._waist_turn_hold_active = False
 
+    def _stop_waist_phi_velocity(self):
+        """Stop continuous waist phi (velocity command)."""
+        if not self._waist_phi_command_enabled or self.ros2_interface is None:
+            self._waist_phi_hold_active = False
+            return
+        try:
+            self.ros2_interface.send_waist_phi_velocity_scale(0.0)
+        except Exception as e:
+            logger.debug(f"Failed to stop waist phi velocity: {e}")
+        self._waist_phi_hold_active = False
+
     def _update_waist_hold_release(self):
         """Detect button release after on_hold callbacks stop."""
         now = time.time()
@@ -1483,17 +1565,38 @@ class JointPanel:
             ):
                 self._stop_waist_turning_velocity()
 
+        if self._waist_phi_hold_active:
+            if (
+                now - self._waist_phi_last_hold_callback_time
+                > self._waist_hold_release_timeout_s
+            ):
+                self._stop_waist_phi_velocity()
+
     def _update_waist_visibility(self):
         if self._waist_folder is None:
             return
 
+        controller = (
+            getattr(self.ros2_interface, "body_controller", "") or ""
+        ).lower()
+        # Match RViz: split body permits OCS2/MOVEJ; WBC and other controllers
+        # expose waist commands only in MOVEJ.
+        allowed_states = (3, 4) if "body_joint_controller" in controller else (4,)
         visible = (
             self._current_category == "body"
             and self._is_joint_control_enabled
             and self._joints_initialized
             and self._waist_enabled
+            and self._current_fsm_state in allowed_states
         )
 
+        if not visible:
+            if self._waist_hold_active:
+                self._stop_waist_velocity()
+            if self._waist_turn_hold_active:
+                self._stop_waist_turning_velocity()
+            if self._waist_phi_hold_active:
+                self._stop_waist_phi_velocity()
         self._waist_folder.visible = visible
 
     @staticmethod
@@ -1740,6 +1843,7 @@ class JointPanel:
     
     def cleanup(self):
         """Cleanup resources."""
+        self._stop_waist_phi_velocity()
         self._cleaned_up = True
         
         # Hide GUI elements
@@ -1765,6 +1869,7 @@ class JointPanel:
         self._waist_enabled = False
         self._waist_command_enabled = False
         self._waist_turning_command_enabled = False
+        self._waist_phi_command_enabled = False
         self._waist_pose_relative_enabled = False
         self._waist_pose_absolute_enabled = False
         self._waist_pose_x_slider = None
@@ -1776,13 +1881,17 @@ class JointPanel:
         self._waist_lifting_slider = None
         self._waist_speed_slider = None
         self._waist_turn_speed_slider = None
+        self._waist_phi_speed_slider = None
         self._waist_action_group = None
         self._waist_hold_up_button = None
         self._waist_hold_down_button = None
         self._waist_hold_turn_left_button = None
+        self._waist_hold_phi_forward_button = None
         self._waist_hold_turn_right_button = None
+        self._waist_hold_phi_backward_button = None
         self._waist_hold_active = False
         self._waist_turn_hold_active = False
+        self._waist_phi_hold_active = False
         self._joint_controls.clear()
         self._left_arm_controls.clear()
         self._right_arm_controls.clear()
