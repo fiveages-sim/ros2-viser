@@ -78,8 +78,11 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "waist_hold_up": "上升(按住)",
         "waist_hold_down": "下降(按住)",
         "waist_turning_ratio": "旋转速度比",
+        "waist_phi_ratio": "俯仰速度比例",
         "waist_hold_turn_left": "左转(按住)",
+        "waist_hold_phi_forward": "前倾(按住)",
         "waist_hold_turn_right": "右转(按住)",
+        "waist_hold_phi_backward": "后仰(按住)",
         
         # Hardware Panel
         "hardware_control": "驱动层配置",
@@ -203,8 +206,11 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "waist_hold_up": "Up (hold)",
         "waist_hold_down": "Down (hold)",
         "waist_turning_ratio": "Turn Speed Ratio",
+        "waist_phi_ratio": "Pitch Speed Ratio",
         "waist_hold_turn_left": "Turn Left (hold)",
+        "waist_hold_phi_forward": "Tilt Forward (hold)",
         "waist_hold_turn_right": "Turn Right (hold)",
+        "waist_hold_phi_backward": "Tilt Backward (hold)",
         
         # Hardware Panel
         "hardware_control": "Hardware Config",
