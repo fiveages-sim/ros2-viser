@@ -5,6 +5,7 @@ import math
 import time
 from typing import Optional, Dict, List, Any
 from io import StringIO
+from weakref import WeakKeyDictionary
 
 import viser
 import yourdfpy
@@ -14,6 +15,60 @@ from ros2_robot_interface import ROS2RobotInterface
 from ..i18n import get_translator
 
 logger = logging.getLogger(__name__)
+
+# Per robot interface. The panel is rebuilt on every namespace switch, but the
+# session's ROS2RobotInterface stays alive, so the next switch reuses this.
+_WAIST_PARAM_CACHE: WeakKeyDictionary = WeakKeyDictionary()
+
+
+def remember_waist_lifting_enabled(
+    interface: Any,
+    enabled: bool,
+    node: Optional[str] = None,
+) -> None:
+    """Remember ``waist_lifting_enabled`` for later panel rebuilds on this robot."""
+    if interface is None:
+        return
+    _WAIST_PARAM_CACHE[interface] = {
+        "enabled": bool(enabled),
+        "node": node,
+    }
+
+
+def _cached_waist_lifting_enabled(interface: Any) -> Optional[Dict[str, Any]]:
+    cached = _WAIST_PARAM_CACHE.get(interface)
+    if not isinstance(cached, dict) or "enabled" not in cached:
+        return None
+    return cached
+
+
+def _workspace_namespace(interface: Any) -> str:
+    cfg = getattr(interface, "config", None)
+    if cfg is None:
+        return ""
+    raw = getattr(cfg, "namespace", None) or getattr(cfg, "topic_prefix", None) or ""
+    return str(raw).strip("/")
+
+
+def _qualify_controller_node(interface: Any, node_name: str) -> str:
+    """Return an absolute controller node name under the robot namespace.
+
+    ``body_controller`` is often a relative name (``ocs2_wbc_controller``) because
+    the interface node already lives in ``/g1d``. Parameter services need the
+    fully qualified name ``/g1d/ocs2_wbc_controller``.
+    """
+    name = (node_name or "").strip()
+    if not name:
+        return ""
+    if not name.startswith("/"):
+        name = "/" + name
+    namespace = _workspace_namespace(interface)
+    if not namespace:
+        return name
+    prefix = f"/{namespace}/"
+    if name == f"/{namespace}" or name.startswith(prefix):
+        return name
+    return f"/{namespace}{name}"
 
 
 class JointPanel:
@@ -740,24 +795,55 @@ class JointPanel:
             getattr(self.ros2_interface, "waist_lifting_pose_absolute_pub", None) is not None
         )
 
+        cached = _cached_waist_lifting_enabled(self.ros2_interface)
+        if cached is not None:
+            self._waist_enabled = bool(cached["enabled"])
+            logger.debug(
+                "Using cached waist_lifting_enabled=%s (node=%s)",
+                self._waist_enabled,
+                cached.get("node"),
+            )
+            return
+
         try:
             # Prefer discovered body controller node (split body_joint_controller or WBC).
-            body_node = getattr(self.ros2_interface, "body_controller", "") or ""
-            candidate_nodes = []
+            # Qualify with the robot namespace: the interface stores a relative name.
+            candidate_nodes: List[str] = []
+            body_node = _qualify_controller_node(
+                self.ros2_interface,
+                getattr(self.ros2_interface, "body_controller", "") or "",
+            )
             if body_node:
-                candidate_nodes.append(body_node if body_node.startswith("/") else f"/{body_node}")
-            # Fallbacks for older stacks / incomplete discovery
+                candidate_nodes.append(body_node)
             for fallback in ("/body_joint_controller", "/ocs2_wbc_controller"):
-                if fallback not in candidate_nodes:
-                    candidate_nodes.append(fallback)
+                qualified = _qualify_controller_node(self.ros2_interface, fallback)
+                if qualified and qualified not in candidate_nodes:
+                    candidate_nodes.append(qualified)
+
+            # Only call parameter services for nodes that are actually in the graph.
+            # A missing service blocks for the full wait_for_service timeout.
+            try:
+                known_nodes = {
+                    node.get("full_name")
+                    for node in self.ros2_interface.list_nodes()
+                }
+            except Exception as e:
+                logger.warning(f"Failed to list nodes for waist parameter lookup: {e}")
+                self._waist_enabled = False
+                return
+            live_nodes = [name for name in candidate_nodes if name in known_nodes]
 
             enabled = False
             queried_node = None
-            for node_name in candidate_nodes:
+            saw_params = False
+            for node_name in live_nodes:
                 try:
                     params = self.ros2_interface.list_node_parameters(node_name)
                 except Exception:
                     continue
+                if not params:
+                    continue
+                saw_params = True
                 for param in params:
                     if param.get("name") == "waist_lifting_enabled":
                         enabled = bool(param.get("value"))
@@ -767,6 +853,12 @@ class JointPanel:
                     break
 
             self._waist_enabled = enabled
+            # Cache a real answer only. An empty service response is a timeout,
+            # and retrying that on the next switch is cheaper than sticking a false.
+            if queried_node is not None or saw_params:
+                remember_waist_lifting_enabled(
+                    self.ros2_interface, enabled, queried_node
+                )
             logger.info(
                 "Waist control enabled=%s (node=%s), lift command=%s, turn command=%s, "
                 "pose relative=%s, pose absolute=%s",
