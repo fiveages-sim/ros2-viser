@@ -392,7 +392,7 @@ class EndEffectorMarkerManager:
         self._refresh_arm_frame_ids()
         self._refresh_body_head_frame_ids()
 
-        entering_ocs2 = is_ocs2 and self._last_fsm_mode is not True
+        entering_ocs2 = is_ocs2 and self._last_fsm_mode is False
         entering_body = show_body and not self._last_body_tracking
         entering_head = show_head and not self._last_head_tracking
         if entering_ocs2:
@@ -875,7 +875,11 @@ class EndEffectorMarkerManager:
                 else self.ros2_interface.right_arm_handler if arm == "right" else None)
 
     def _arm_is_urdf_attached(self, arm: str) -> bool:
-        return self._left_is_urdf_link if arm == "left" else self._right_is_urdf_link
+        if arm == "left":
+            return self._left_is_urdf_link
+        if arm == "right":
+            return self._right_is_urdf_link
+        return False
     
     def _extract_pose_data(self, pose) -> Tuple:
         """Extract position and wxyz from a Pose object.

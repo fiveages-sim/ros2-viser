@@ -1,124 +1,111 @@
 # ROS2 Viser
 
-ROS2 机器人可视化工具，使用 Viser 进行 3D 可视化。
+在浏览器里查看 ROS 2 机器人，并切换状态、拖位姿、调关节和夹爪。
 
-## 功能特性
+## 启动
 
-- 自动从 ROS2 话题订阅机器人描述（URDF）
-- 实时可视化机器人关节状态
-- 基于 Viser 的现代化 3D 可视化界面
-- **完全依赖 `ros2_robot_interface`**：所有 ROS2 通信都通过 `ros2_robot_interface` 完成
-- 支持 FSM（有限状态机）控制面板
-- 支持夹爪控制面板
+先让机器人控制栈运行，再在本目录执行：
+
+```bash
+python launch.py
+```
+
+终端会打印本机地址，用浏览器打开。页面先是空场景：
+
+- 图里只有一台机器人时自动加载。
+- 有多台时，在「选择命名空间」里选一台。「空工作空间」不加载模型。
+- 机器人后上线时，点「刷新命名空间列表」。
+
+`launch.py` 把可视化坐标系设为 `world`，画面按 100 Hz 刷新，并一直等待机器人描述。固定基座可以把坐标系留空，模型会固定在场景原点。
+
+## 界面
+
+### 显示
+
+- **选择命名空间**：当前要看、要操作的那一台。控制器列表也只显示这一台。
+- **可视化坐标系**：固定基座用「URDF 根（固定）」，模型放在场景原点。移动底盘（例如 G1D）选 `world`、`map` 或 `odom`，模型和拖拽手柄落在同一地面。留在固定根时，世界系里的手柄会和机器人高低错开。点「刷新坐标系列表」更新可选项。
+- **显示 Visual / Collision**：开关外观网格和碰撞网格。
+- **显示双臂当前目标**：画出控制器上一次的双臂目标，用来对照手是否跟上。HOLD 里也能看。
+- **语言**：中文或 English。
+
+### 状态
+
+| 按钮 | 作用 |
+| --- | --- |
+| HOME | 回零，点击后需要确认 |
+| HOLD | 保持当前位置 |
+| OCS2 | 笛卡尔和全身控制。拖拽手柄、全身开关在这个状态下使用 |
+| MOVEJ | 关节空间。关节滑条在这个状态下发送 |
+| 切换姿态 | 仅在 HOME 下可用 |
+
+全身控制只在 OCS2、并且当前是全身控制器时出现，开关与 RViz 一致：
+
+- 底盘解锁、左臂启用、右臂启用、双臂耦合、参考关节
+- 身体模式：自由、竖直、跟随、锁定、自定义
+- 头部模式：禁用、追踪、注视、朝前
+
+能力信息尚未到达时，面板显示「等待 WBC 能力信息」。
+
+### 拖拽位姿
+
+OCS2 下可以拖左右臂手柄。
+
+- 身体手柄在身体模式为「跟随」、且头部模式不是「朝前」时出现。
+- 头部手柄在头部模式为「追踪」时出现。
+
+**末端指令模式**
+
+- 连续发布：拖动过程中持续发给机器人。
+- 单次发布：拖到目标位置后，点「发送末端位置」才发。
+
+切入 OCS2 时，手柄会移到当前手臂位置。这次对齐不会作为指令发出；紧接着的很短时间里，拖动也不会发出，避免把跳到当前位置当成新目标。页面打开时如果机器人已经在 OCS2，手柄保持当前显示，不会因为刚打开就自己跳一次。
+
+身体、头部手柄第一次出现时会先对准当前目标，这次对准同样不会发出。
+
+### 关节、腰、夹爪和控制器
+
+- **关节控制**：按身体、头、左右臂、左右手分类。OCS2 里调末端位姿，MOVEJ 里拖关节滑条后点「发送目标位置」。
+- **腰部控制**：当前控制器打开了腰部功能时出现。可以升降、转向，或发送腰部 x / z / phi。
+- **末端执行器**：打开或关闭左、右夹爪。
+- **控制器配置**：只列出当前这台机器人上的控制器，可改持续时间和插值等参数。
+- **驱动层配置**：检测到 M6 CCS 时可以改控制模式和阻抗参数。
+
+## 配置
+
+常用项在 `ROS2ViserConfig` 里。不改则使用下表的默认值。`launch.py` 覆盖了其中三项，见上一节。
+
+| 项 | 默认 | 什么时候改 |
+| --- | --- | --- |
+| `visualization_frame` | 空 | 移动底盘设为 `world`、`map` 或 `odom`。空表示模型固定在场景原点 |
+| `robot_description_topic` | `/robot_description` | 指定要打开的那一台。保持默认时，只有一台就自动加载，多台则在界面里选 |
+| `update_rate` | 30 | 画面刷新频率（Hz） |
+| `language` | `zh` | `zh` 或 `en` |
+| `marker_continuous_publish` | 关 | 打开后拖拽时持续发位姿；关掉则要点发送按钮 |
+| `show_current_target_axes` | 开 | 是否显示双臂当前目标坐标轴 |
+| `enable_fsm_panel` | 开 | 关掉则不显示状态面板 |
+| `enable_joint_panel` | 开 | 关掉则不显示关节面板 |
+| `enable_gripper_panel` | 开 | 关掉则不显示夹爪面板 |
+| `enable_end_effector_marker` | 开 | 关掉则不显示拖拽手柄 |
+| `robot_description_timeout` | 30 秒 | 等待机器人描述的时间。`0` 表示一直等 |
+
+```python
+from ros2_viser import ROS2ViserVisualizer, ROS2ViserConfig
+
+config = ROS2ViserConfig(visualization_frame="world")
+visualizer = ROS2ViserVisualizer(config)
+visualizer.start()
+```
+
+用完调用 `visualizer.stop()`。也可以写成 `with ROS2ViserVisualizer(config) as visualizer:`，退出时自动停。
 
 ## 安装
 
-### 从源码安装
-
 ```bash
-cd ros2_viser
+cd ros2-viser
 pip install -e .
 ```
 
-## 依赖
-
-- `ros2-robot-interface` - **必需**，ROS2 机器人接口（所有 ROS2 通信都通过此接口完成）
-- `viser` - 3D 可视化库
-- `yourdfpy` - URDF 解析库
-- `rclpy` - ROS2 Python 客户端库（通过 `ros2_robot_interface` 间接使用）
-
-## 使用方法
-
-**重要说明**：`ros2_viser` 完全依赖 `ros2_robot_interface`。所有 ROS2 通信（包括关节状态订阅）都通过 `ros2_robot_interface` 完成。`ros2_viser` 会自动创建内部的 `ROS2RobotInterface` 实例。
-
-### 基本使用
-
-```python
-from ros2_viser import ROS2ViserVisualizer, ROS2ViserConfig
-import time
-
-# 创建配置（会自动创建内部的 ROS2RobotInterface）
-config = ROS2ViserConfig(
-    robot_description_topic="/robot_description",
-    joint_states_topic="/joint_states",
-    root_node_name="/robot",
-    update_rate=30.0
-)
-
-# 创建并启动可视化器
-visualizer = ROS2ViserVisualizer(config)
-visualizer.start()
-
-# 保持运行
-try:
-    while True:
-        time.sleep(1)
-except KeyboardInterrupt:
-    visualizer.stop()
-```
-
-### 使用上下文管理器
-
-```python
-from ros2_viser import ROS2ViserVisualizer, ROS2ViserConfig
-import time
-
-config = ROS2ViserConfig(
-    robot_description_topic="/robot_description",
-    joint_states_topic="/joint_states"
-)
-
-with ROS2ViserVisualizer(config) as visualizer:
-    # 可视化器自动启动
-    time.sleep(60)  # 运行 60 秒
-# 自动清理资源
-```
-
-## 配置选项
-
-### ROS2ViserConfig
-
-- `robot_description_topic` (str): 机器人描述话题（URDF），默认 `/robot_description`
-- `joint_states_topic` (str): 关节状态话题，默认 `/joint_states`，用于创建内部的 `ROS2RobotInterface`
-- `root_node_name` (str): Viser 场景中的根节点名称，默认 `/robot`
-- `update_rate` (float): 可视化更新频率（Hz），默认 30.0
-- `auto_connect` (bool): 是否自动连接 ROS2 接口，默认 True
-- `enable_fsm_panel` (bool): 是否启用 FSM（有限状态机）控制面板，默认 True
-- `enable_gripper_panel` (bool): 是否启用夹爪控制面板，默认 True
-
-**注意**：
-- 所有 ROS2 通信都通过内部自动创建的 `ros2_robot_interface` 完成，包括关节状态订阅
-
-## 工作原理
-
-1. **初始化 ROS2 接口**：根据 `joint_states_topic` 自动创建 `ROS2RobotInterface` 实例
-   
-2. **订阅机器人描述**：通过 `ros2_robot_interface` 的 ROS2 节点订阅 `/robot_description` 话题获取 URDF 字符串
-
-3. **解析 URDF**：使用 `yourdfpy` 解析 URDF 并提取关节信息
-
-4. **初始化 Viser**：创建 Viser 服务器并加载 URDF 模型到 3D 场景
-
-5. **获取关节状态**：**通过 `ros2_robot_interface.get_joint_state()` 获取实时关节状态**（所有关节状态都通过接口获取，不直接订阅话题）
-
-6. **更新可视化**：根据关节状态实时更新机器人模型姿态
-
-7. **控制面板**（可选）：
-   - FSM 面板：通过 `ros2_robot_interface.send_fsm_command()` 发送状态切换命令
-   - 夹爪面板：通过 `ros2_robot_interface` 的夹爪处理器控制夹爪
-
-## 注意事项
-
-- **必须安装 `ros2_robot_interface`**：所有 ROS2 通信都通过此接口完成
-- 确保 ROS2 环境中已发布 `/robot_description` 话题（URDF）
-- 确保 `/joint_states` 话题正在发布关节状态
-- 可视化器会自动等待最多 30 秒来接收机器人描述
-- 关节名称必须与 URDF 中的关节名称匹配
-- FSM 和夹爪控制面板需要 `ros2_robot_interface` 支持相应的功能
-
-## 示例
-
-完整示例请参考 `examples/` 目录。
+需要已有 ROS 2 环境，以及 `ros2-robot-interface` 和 `viser`。
 
 ## 许可证
 
