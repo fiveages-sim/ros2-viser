@@ -13,11 +13,35 @@ from ..modal_dialog.controller_config_dialog import ControllerConfigDialog
 logger = logging.getLogger(__name__)
 
 
+def _workspace_ns(ros2_interface: ROS2RobotInterface) -> str:
+    """Return the active robot workspace namespace without leading/trailing slashes."""
+    cfg = getattr(ros2_interface, "config", None)
+    if cfg is None:
+        return ""
+    raw = (getattr(cfg, "namespace", None) or getattr(cfg, "topic_prefix", None) or "")
+    return str(raw).strip("/")
+
+
+def _node_in_workspace(node: Dict[str, str], workspace_ns: str) -> bool:
+    """True if *node* belongs to the selected robot workspace."""
+    node_ns = (node.get("namespace") or "/").strip("/")
+    full_name = node.get("full_name") or ""
+    if not workspace_ns:
+        # Global / empty workspace: only root-namespace nodes.
+        return node_ns == ""
+    if node_ns == workspace_ns or node_ns.startswith(workspace_ns + "/"):
+        return True
+    prefix = f"/{workspace_ns}/"
+    return full_name.startswith(prefix) or full_name == f"/{workspace_ns}"
+
+
 def _list_controllers(ros2_interface: ROS2RobotInterface) -> List[Dict[str, str]]:
-    """List all controllers by finding controller_manager node and querying controllers.
-    
-    This function attempts to find controller_manager node and list controllers.
-    If controller_manager is not found, it falls back to finding nodes with 'controller' in their name.
+    """List controllers in the interface's robot workspace only.
+
+    Uses ``list_nodes()``, which matches ``ros2 node list`` and omits hidden
+    nodes (name or namespace segment starting with ``_``). Keeps nodes whose
+    name contains ``controller``, excluding ``controller_manager``, then
+    filters by ``topic_prefix`` / ``namespace``.
     
     Args:
         ros2_interface: ROS2RobotInterface instance.
@@ -31,43 +55,38 @@ def _list_controllers(ros2_interface: ROS2RobotInterface) -> List[Dict[str, str]
     controllers = []
     
     try:
-        # Get all nodes
+        workspace_ns = _workspace_ns(ros2_interface)
         nodes = ros2_interface.list_nodes()
         
-        # Try to find controller_manager node first
-        controller_manager_node = None
+        # Prefer controller_manager in this workspace (for future service listing).
         for node in nodes:
-            if 'controller_manager' in node['name'].lower():
-                controller_manager_node = node
+            if "controller_manager" not in node["name"].lower():
+                continue
+            if _node_in_workspace(node, workspace_ns):
+                logger.debug(
+                    "Found workspace controller_manager: %s", node["full_name"]
+                )
                 break
         
-        # If controller_manager found, try to use its service to list controllers
-        if controller_manager_node is not None:
-            try:
-                # Try to use controller_manager service
-                # Note: This requires controller_manager_msgs package
-                # For now, we'll use a fallback approach
-                logger.debug(f"Found controller_manager node: {controller_manager_node['full_name']}")
-            except Exception as e:
-                logger.debug(f"Could not use controller_manager service: {e}")
-        
-        # Fallback: Find all nodes with 'controller' in their name
-        # Filter out controller_manager itself
         for node in nodes:
-            node_name_lower = node['name'].lower()
-            # Skip controller_manager node itself
-            if 'controller_manager' in node_name_lower:
+            node_name_lower = node["name"].lower()
+            if "controller_manager" in node_name_lower:
                 continue
-            
-            # Look for nodes with 'controller' in name
-            if 'controller' in node_name_lower:
-                controllers.append({
-                    'name': node['name'],
-                    'full_name': node['full_name'],
-                    'state': 'unknown'  # State not available without controller_manager service
-                })
+            if "controller" not in node_name_lower:
+                continue
+            if not _node_in_workspace(node, workspace_ns):
+                continue
+            controllers.append({
+                "name": node["name"],
+                "full_name": node["full_name"],
+                "state": "unknown",
+            })
         
-        logger.debug(f"Found {len(controllers)} controllers")
+        logger.debug(
+            "Found %d controllers in workspace %r",
+            len(controllers),
+            workspace_ns or "/",
+        )
         return controllers
         
     except Exception as e:

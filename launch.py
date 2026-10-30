@@ -20,13 +20,16 @@ def main():
         robot_description_topic="/robot_description",
         joint_states_topic="/joint_states",
         root_node_name="/robot",
+        # Mobile bases (G1D): keep scene ≡ world so robot and OCS2 markers share height.
+        visualization_frame="world",
         update_rate=100.0,
         robot_description_timeout=0.0
     )
     
     # Create and start visualizer
     print("Starting ROS2 Viser visualizer...")
-    print("Make sure ROS2 is running and /robot_description topic is available.")
+    print("Opens an empty scene first. Robots are detected from */robot_description topics.")
+    print("If exactly one is found it loads automatically; otherwise pick one in the GUI.")
     print("=" * 60)
     
     visualizer = ROS2ViserVisualizer(config)

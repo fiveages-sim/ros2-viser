@@ -9,6 +9,7 @@ from ros2_robot_interface import ROS2RobotInterface
 
 from .base_modal_dialog import BaseModalDialog
 from ..i18n import get_translator
+from ..panels.joint_panel import remember_waist_lifting_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -461,9 +462,14 @@ class ControllerConfigDialog(BaseModalDialog):
             )
             
             if success:
-                pass
+                if "waist_lifting_enabled" in changed_params:
+                    remember_waist_lifting_enabled(
+                        self.ros2_interface,
+                        bool(changed_params["waist_lifting_enabled"]),
+                        self.controller_node_name,
+                    )
             else:
-                logger.warning(f"Failed to set some parameters")
+                logger.warning("Failed to set some parameters")
             
             # Call callback with changed parameters
             if self.on_confirm is not None:

@@ -27,6 +27,17 @@ class ROS2ViserConfig:
     
     root_node_name: str = "/robot"
     """Root node name in Viser scene."""
+
+    visualization_frame: str = ""
+    """TF frame used as the Viser scene / world frame for placing the robot root.
+
+    Empty string keeps the URDF root fixed at the scene origin. For mobile bases
+    (e.g. G1D), prefer ``world`` / ``map`` / ``odom`` so the model and OCS2
+    markers share the same ground plane via
+    ``lookup_transform(visualization_frame, urdf_root_link)``. Leaving this empty
+    while multiple namespaced robots are loaded stacks them at the origin and
+    makes world-frame markers look height-shifted by the chassis/lift offset.
+    """
     
     update_rate: float = 30
     """Update rate in Hz."""
@@ -60,6 +71,11 @@ class ROS2ViserConfig:
     If True, marker position is published continuously while dragging.
     If False, marker position is only published when clicking the send button.
     Default: False"""
+
+    show_current_target_axes: bool = True
+    """Show axes for the controller's last dual-arm ``*_current_target`` poses
+    (RViz Pose display equivalent). Useful for debugging command vs feedback.
+    Default: True"""
     
     language: str = "zh"
     """Language for GUI labels. Options: "zh" (Chinese) or "en" (English). Default: "zh" """
