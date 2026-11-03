@@ -28,6 +28,28 @@ class ROS2ViserConfig:
     root_node_name: str = "/robot"
     """Root node name in Viser scene."""
 
+    prefer_namespaced_robots: bool = True
+    """Ignore a root-namespace ``/robot_description`` when namespaced robots exist.
+
+    Simulations often keep a global ``robot_state_publisher`` publishing
+    ``/robot_description`` while the robot actually being driven lives under a
+    namespace (``/g1d/robot_description``). Loading both puts an extra, unrelated
+    robot in the shared scene, so the root entry is dropped from the picker (and
+    any cached root session is removed) as soon as a namespaced robot appears.
+    Disable this when you really do want the root robot alongside namespaced ones.
+    """
+
+    prune_stale_robots_after: float = 5.0
+    """Seconds without any data before a robot is checked for a live publisher.
+
+    When a simulation stops, its ``robot_description`` publisher disappears but
+    the visualizer keeps the cached session (so the robot stays in the scene and
+    its interface keeps spinning). After this grace period the interface is asked
+    whether the topic still has a publisher; if not the session is destroyed and
+    the picker options are refreshed, so the next simulation run starts from a
+    clean scene. Set ``0`` to disable.
+    """
+
     visualization_frame: str = ""
     """TF frame used as the Viser scene / world frame for placing the robot root.
 

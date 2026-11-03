@@ -60,7 +60,7 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "wbc_head_tracking": "追踪",
         "wbc_head_gaze": "注视",
         "wbc_head_forward": "朝前",
-        "wbc_waiting_capability": "等待 WBC 能力信息",
+        "wbc_waiting_state": "等待 WBC 状态",
         
         # Gripper Panel
         "ee_control": "末端执行器控制",
@@ -214,7 +214,7 @@ _TRANSLATIONS: Dict[Language, Dict[str, str]] = {
         "wbc_head_tracking": "Tracking",
         "wbc_head_gaze": "Gaze",
         "wbc_head_forward": "Forward",
-        "wbc_waiting_capability": "Waiting for WBC capabilities",
+        "wbc_waiting_state": "Waiting for WBC state",
         
         # Gripper Panel
         "ee_control": "EE Control",

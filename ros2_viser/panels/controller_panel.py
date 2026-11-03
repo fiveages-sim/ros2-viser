@@ -9,6 +9,7 @@ from ros2_robot_interface import ROS2RobotInterface
 
 from ..i18n import get_translator
 from ..modal_dialog.controller_config_dialog import ControllerConfigDialog
+from ..scene_utils import safe_remove
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +359,7 @@ class ControllerPanel:
             
             # Remove old folder
             if old_folder is not None:
-                old_folder.remove()
+                safe_remove(old_folder, label="old controller folder")
             
             logger.debug("Controller panel GUI labels updated")
             
@@ -380,7 +381,7 @@ class ControllerPanel:
             self._dialogs.clear()
             
             if self._folder_handle is not None:
-                self._folder_handle.remove()
+                safe_remove(self._folder_handle, label="controller folder")
                 self._folder_handle = None
             
             self._status_text = None

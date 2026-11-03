@@ -13,6 +13,7 @@ import yourdfpy
 from ros2_robot_interface import ROS2RobotInterface
 
 from ..i18n import get_translator
+from ..scene_utils import safe_remove
 
 logger = logging.getLogger(__name__)
 
@@ -886,10 +887,7 @@ class JointPanel:
 
         # Remove old waist UI first to avoid duplicates when rebuilding labels
         if self._waist_folder is not None:
-            try:
-                self._waist_folder.remove()
-            except Exception:
-                pass
+            safe_remove(self._waist_folder, label="waist folder")
 
         # Reset handles
         self._waist_folder = None
@@ -1072,34 +1070,22 @@ class JointPanel:
         # Clear existing controls
         for control in self._joint_controls.values():
             if 'slider' in control:
-                try:
-                    control['slider'].remove()
-                except Exception:
-                    pass
+                safe_remove(control['slider'], label="joint slider")
         
         self._joint_controls.clear()
         
         # Clear left/right arm controls
         for control in self._left_arm_controls.values():
-            try:
-                control.remove()
-            except Exception:
-                pass
+            safe_remove(control, label="left arm control")
         self._left_arm_controls.clear()
         
         for control in self._right_arm_controls.values():
-            try:
-                control.remove()
-            except Exception:
-                pass
+            safe_remove(control, label="right arm control")
         self._right_arm_controls.clear()
         
         # Clear send button (will be recreated at the bottom)
         if self._send_button is not None:
-            try:
-                self._send_button.remove()
-            except Exception:
-                pass
+            safe_remove(self._send_button, label="joint send button")
             self._send_button = None
 
         # Get joints for current category
@@ -1360,10 +1346,7 @@ class JointPanel:
                     )
                     self._category_dropdown.on_update(lambda _: self._on_category_changed())
                 
-                try:
-                    old_dropdown.remove()
-                except Exception:
-                    pass
+                safe_remove(old_dropdown, label="old category dropdown")
     
     def _on_category_changed(self):
         """Handle category dropdown change."""
@@ -1924,10 +1907,7 @@ class JointPanel:
             self._rebuild_joint_controls()
             
             # Remove old folder
-            try:
-                old_folder.remove()
-            except Exception:
-                pass
+            safe_remove(old_folder, label="old joint folder")
             
             logger.debug("Joint panel GUI labels updated")
         except Exception as e:
@@ -1944,8 +1924,8 @@ class JointPanel:
                 try:
                     if hasattr(self._folder_handle, 'visible'):
                         self._folder_handle.visible = False
-                    elif hasattr(self._folder_handle, 'remove'):
-                        self._folder_handle.remove()
+                    else:
+                        safe_remove(self._folder_handle, label="joint folder")
                 except Exception:
                     pass
         except Exception as e:

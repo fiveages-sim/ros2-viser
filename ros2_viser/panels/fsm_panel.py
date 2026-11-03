@@ -12,8 +12,14 @@ from ros2_robot_interface import ROS2RobotInterface
 
 from ..i18n import get_translator
 from ..config import ROS2ViserConfig
+from ..scene_utils import safe_remove
 
 logger = logging.getLogger(__name__)
+
+# How long to wait for the first WBC state before hinting at a QoS mismatch.
+_WBC_STATE_WARN_AFTER_S = 5.0
+# Do not repeat the QoS hint more often than this while state stays missing.
+_WBC_STATE_WARN_INTERVAL_S = 60.0
 
 # Body mode display key → mode_command (aligned with RViz OCS2FSMPanel).
 _BODY_MODE_OPTIONS: Tuple[Tuple[str, str, int], ...] = (
@@ -88,10 +94,16 @@ class FSMPanel:
         self._wbc_home_pose_checkbox: Optional[viser.GuiCheckboxHandle] = None
         self._wbc_body_dropdown: Optional[viser.GuiDropdownHandle] = None
         self._wbc_head_dropdown: Optional[viser.GuiDropdownHandle] = None
+        # Guards dropdown writes issued from ``_refresh_wbc_ui``; checkbox handlers
+        # instead compare the event value against ``wbc_state``, which is immune to
+        # the callback arriving after a refresh rewrote ``.value``.
         self._wbc_ui_syncing: bool = False
         self._wbc_body_label_to_cmd: Dict[str, str] = {}
         self._wbc_head_label_to_cmd: Dict[str, str] = {}
         self._wbc_last_visible: Optional[bool] = None
+        # When ``wbc_state`` stays missing, remember since when to hint at QoS.
+        self._wbc_state_missing_since: Optional[float] = None
+        self._wbc_state_warn_ts: float = 0.0
         
         # Initialization flag
         self._initialized = False
@@ -248,6 +260,7 @@ class FSMPanel:
             return
         try:
             self.ros2_interface.send_mode_command(command)
+            logger.info("Published mode command: %s", command)
         except Exception as e:
             logger.error(f"Failed to send mode command {command!r}: {e}", exc_info=True)
 
@@ -312,7 +325,7 @@ class FSMPanel:
         with self._wbc_folder:
             self._wbc_status_text = self.server.gui.add_text(
                 self.translator("status"),
-                initial_value=self.translator("wbc_waiting_capability"),
+                initial_value=self.translator("wbc_waiting_state"),
                 disabled=True,
             )
             self._wbc_base_checkbox = self.server.gui.add_checkbox(
@@ -432,8 +445,7 @@ class FSMPanel:
         if handle is None:
             return
         handle.disabled = disabled
-        if handle.value != value:
-            handle.value = value
+        handle.value = value
 
     def _refresh_wbc_ui(self) -> None:
         """Sync WBC widgets from capability + current_state (RViz refreshWbcUi)."""
@@ -444,7 +456,7 @@ class FSMPanel:
         cap = getattr(self.ros2_interface, "wbc_capability", None)
         if state is None:
             if self._wbc_status_text is not None:
-                self._wbc_status_text.value = self.translator("wbc_waiting_capability")
+                self._wbc_status_text.value = self.translator("wbc_waiting_state")
             return
 
         left_enabled = state.left_arm_state == WbcCurrentState.ARM_ENABLED
@@ -523,90 +535,96 @@ class FSMPanel:
         finally:
             self._wbc_ui_syncing = False
 
-    def _on_wbc_base_toggled(self, _event) -> None:
-        if self._cleaned_up or self._wbc_ui_syncing or self._wbc_base_checkbox is None:
+    def _on_wbc_base_toggled(self, event) -> None:
+        """Checkbox ON means the base is unlocked."""
+        if self._cleaned_up or self._wbc_base_checkbox is None:
             return
         cap = getattr(self.ros2_interface, "wbc_capability", None)
         if cap is not None and not cap.has_mobile_base:
             self._refresh_wbc_ui()
             return
         state = getattr(self.ros2_interface, "wbc_state", None)
-        locked = state is None or state.base_state == WbcCurrentState.BASE_LOCKED
-        desired = self._wbc_base_checkbox.value
-        # Checkbox ON means unlocked.
-        if desired and locked:
-            self._send_mode_command("BASE_UNLOCK")
-        elif (not desired) and (not locked):
-            self._send_mode_command("BASE_LOCK")
+        if state is None:
+            return
+        desired = bool(event.target.value)
+        actual = state.base_state == WbcCurrentState.BASE_UNLOCKED
+        if desired == actual:
+            # Echo of our own refresh, or a stale UI value: nothing to send.
+            return
+        self._send_mode_command("BASE_UNLOCK" if desired else "BASE_LOCK")
 
-    def _on_wbc_left_arm_toggled(self, _event) -> None:
-        if self._cleaned_up or self._wbc_ui_syncing or self._wbc_left_arm_checkbox is None:
+    def _on_wbc_left_arm_toggled(self, event) -> None:
+        if self._cleaned_up or self._wbc_left_arm_checkbox is None:
             return
         state = getattr(self.ros2_interface, "wbc_state", None)
-        if state is not None and state.bimanual_state == WbcCurrentState.BIMANUAL_COUPLED:
+        if state is None:
+            return
+        if state.bimanual_state == WbcCurrentState.BIMANUAL_COUPLED:
             self._refresh_wbc_ui()
             return
-        enabled = state is not None and state.left_arm_state == WbcCurrentState.ARM_ENABLED
-        desired = self._wbc_left_arm_checkbox.value
-        if desired and not enabled:
-            self._send_mode_command("LEFT_ARM_ENABLE")
-        elif (not desired) and enabled:
-            self._send_mode_command("LEFT_ARM_DISABLE")
+        desired = bool(event.target.value)
+        actual = state.left_arm_state == WbcCurrentState.ARM_ENABLED
+        if desired == actual:
+            return
+        self._send_mode_command("LEFT_ARM_ENABLE" if desired else "LEFT_ARM_DISABLE")
 
-    def _on_wbc_right_arm_toggled(self, _event) -> None:
-        if self._cleaned_up or self._wbc_ui_syncing or self._wbc_right_arm_checkbox is None:
+    def _on_wbc_right_arm_toggled(self, event) -> None:
+        if self._cleaned_up or self._wbc_right_arm_checkbox is None:
             return
         state = getattr(self.ros2_interface, "wbc_state", None)
-        if state is not None and state.bimanual_state == WbcCurrentState.BIMANUAL_COUPLED:
+        if state is None:
+            return
+        if state.bimanual_state == WbcCurrentState.BIMANUAL_COUPLED:
             self._refresh_wbc_ui()
             return
-        enabled = state is not None and state.right_arm_state == WbcCurrentState.ARM_ENABLED
-        desired = self._wbc_right_arm_checkbox.value
-        if desired and not enabled:
-            self._send_mode_command("RIGHT_ARM_ENABLE")
-        elif (not desired) and enabled:
-            self._send_mode_command("RIGHT_ARM_DISABLE")
+        desired = bool(event.target.value)
+        actual = state.right_arm_state == WbcCurrentState.ARM_ENABLED
+        if desired == actual:
+            return
+        self._send_mode_command("RIGHT_ARM_ENABLE" if desired else "RIGHT_ARM_DISABLE")
 
-    def _on_wbc_bimanual_toggled(self, _event) -> None:
-        if self._cleaned_up or self._wbc_ui_syncing or self._wbc_bimanual_checkbox is None:
+    def _on_wbc_bimanual_toggled(self, event) -> None:
+        if self._cleaned_up or self._wbc_bimanual_checkbox is None:
             return
         cap = getattr(self.ros2_interface, "wbc_capability", None)
-        state = getattr(self.ros2_interface, "wbc_state", None)
         if cap is not None and not cap.has_bimanual_coupling:
             self._refresh_wbc_ui()
             return
-        if state is not None and (
+        state = getattr(self.ros2_interface, "wbc_state", None)
+        if state is None:
+            return
+        if (
             state.left_arm_state != WbcCurrentState.ARM_ENABLED
             or state.right_arm_state != WbcCurrentState.ARM_ENABLED
         ):
             self._refresh_wbc_ui()
             return
-        coupled = state is not None and state.bimanual_state == WbcCurrentState.BIMANUAL_COUPLED
-        desired = self._wbc_bimanual_checkbox.value
-        if desired and not coupled:
-            self._send_mode_command("ARMS_COUPLED")
-        elif (not desired) and coupled:
-            self._send_mode_command("ARMS_INDEPENDENT")
+        desired = bool(event.target.value)
+        actual = state.bimanual_state == WbcCurrentState.BIMANUAL_COUPLED
+        if desired == actual:
+            return
+        self._send_mode_command("ARMS_COUPLED" if desired else "ARMS_INDEPENDENT")
 
-    def _on_wbc_home_pose_toggled(self, _event) -> None:
-        if self._cleaned_up or self._wbc_ui_syncing or self._wbc_home_pose_checkbox is None:
+    def _on_wbc_home_pose_toggled(self, event) -> None:
+        if self._cleaned_up or self._wbc_home_pose_checkbox is None:
             return
         cap = getattr(self.ros2_interface, "wbc_capability", None)
         if cap is not None and not cap.has_home_joint_reference:
             self._refresh_wbc_ui()
             return
         state = getattr(self.ros2_interface, "wbc_state", None)
-        on = state is not None and bool(state.home_joint_reference_enabled)
-        desired = self._wbc_home_pose_checkbox.value
-        if desired and not on:
-            self._send_mode_command("HOME_JOINT_ON")
-        elif (not desired) and on:
-            self._send_mode_command("HOME_JOINT_OFF")
+        if state is None:
+            return
+        desired = bool(event.target.value)
+        actual = bool(state.home_joint_reference_enabled)
+        if desired == actual:
+            return
+        self._send_mode_command("HOME_JOINT_ON" if desired else "HOME_JOINT_OFF")
 
-    def _on_wbc_body_mode_changed(self, _event) -> None:
+    def _on_wbc_body_mode_changed(self, event) -> None:
         if self._cleaned_up or self._wbc_ui_syncing or self._wbc_body_dropdown is None:
             return
-        command = self._wbc_body_label_to_cmd.get(self._wbc_body_dropdown.value)
+        command = self._wbc_body_label_to_cmd.get(event.target.value)
         if not command:
             return
         state = getattr(self.ros2_interface, "wbc_state", None)
@@ -616,10 +634,10 @@ class FSMPanel:
                     return
         self._send_mode_command(command)
 
-    def _on_wbc_head_mode_changed(self, _event) -> None:
+    def _on_wbc_head_mode_changed(self, event) -> None:
         if self._cleaned_up or self._wbc_ui_syncing or self._wbc_head_dropdown is None:
             return
-        command = self._wbc_head_label_to_cmd.get(self._wbc_head_dropdown.value)
+        command = self._wbc_head_label_to_cmd.get(event.target.value)
         if not command:
             return
         state = getattr(self.ros2_interface, "wbc_state", None)
@@ -709,6 +727,36 @@ class FSMPanel:
         self._set_wbc_controls_visible(show_wbc)
         if show_wbc:
             self._refresh_wbc_ui()
+            self._warn_if_wbc_state_missing()
+
+    def _warn_if_wbc_state_missing(self) -> None:
+        """Hint at a QoS mismatch when ``current_state`` never reaches us.
+
+        ``ROS2RobotInterface`` subscribes with ``TRANSIENT_LOCAL`` durability to
+        match the controller. A volatile publisher is silently incompatible, which
+        only shows up as an eternally empty WBC panel.
+        """
+        if getattr(self.ros2_interface, "wbc_state", None) is not None:
+            self._wbc_state_missing_since = None
+            return
+        now = time.monotonic()
+        if self._wbc_state_missing_since is None:
+            self._wbc_state_missing_since = now
+            return
+        missing_for = now - self._wbc_state_missing_since
+        if missing_for < _WBC_STATE_WARN_AFTER_S:
+            return
+        if now - self._wbc_state_warn_ts < _WBC_STATE_WARN_INTERVAL_S:
+            return
+        self._wbc_state_warn_ts = now
+        config = getattr(self.ros2_interface, "config", None)
+        logger.warning(
+            "No WBC state received for %.0fs (topic_prefix=%r). The subscription "
+            "expects a TRANSIENT_LOCAL publisher; check publisher durability with "
+            "`ros2 topic info -v /ocs2_wbc_controller/current_state`.",
+            missing_for,
+            getattr(config, "topic_prefix", ""),
+        )
     
     def update_gui_labels(self):
         """Update GUI labels with current language without recreating subscriptions.
@@ -758,10 +806,7 @@ class FSMPanel:
                 self._create_wbc_controls()
             
             # Remove old folder
-            try:
-                old_folder.remove()
-            except Exception as e:
-                logger.debug(f"Could not remove old folder: {e}")
+            safe_remove(old_folder, label="old FSM folder")
             
             # Force visibility refresh (marker controls recreated above)
             self._current_fsm_state = 0
@@ -790,8 +835,8 @@ class FSMPanel:
                 try:
                     if hasattr(self._folder_handle, 'visible'):
                         self._folder_handle.visible = False
-                    elif hasattr(self._folder_handle, 'remove'):
-                        self._folder_handle.remove()
+                    else:
+                        safe_remove(self._folder_handle, label="FSM folder")
                 except Exception as e:
                     logger.debug(f"Could not hide/remove folder: {e}")
         except Exception as e:

@@ -12,6 +12,7 @@ from arms_ros2_control_msgs.msg import WbcCurrentState
 from ros2_robot_interface import ROS2RobotInterface
 from .config import ROS2ViserConfig
 from .i18n import Translator
+from .scene_utils import safe_remove
 
 logger = logging.getLogger(__name__)
 
@@ -301,48 +302,38 @@ class EndEffectorMarkerManager:
     def cleanup(self):
         """Cleanup markers and frame nodes."""
         if self._left_ee_marker is not None:
-            self._left_ee_marker.remove()
+            safe_remove(self._left_ee_marker, label="left end-effector marker")
             self._left_ee_marker = None
             self._last_left_ee_pose = None
 
         if self._right_ee_marker is not None:
-            self._right_ee_marker.remove()
+            safe_remove(self._right_ee_marker, label="right end-effector marker")
             self._right_ee_marker = None
             self._last_right_ee_pose = None
 
         if self._body_marker is not None:
-            self._body_marker.remove()
+            safe_remove(self._body_marker, label="body marker")
             self._body_marker = None
             self._last_body_marker_pose = None
 
         if self._head_marker is not None:
-            self._head_marker.remove()
+            safe_remove(self._head_marker, label="head marker")
             self._head_marker = None
             self._last_head_marker_pose = None
 
         for axes in (self._left_current_target_axes, self._right_current_target_axes):
-            if axes is not None:
-                try:
-                    axes.remove()
-                except Exception:
-                    pass
+            safe_remove(axes, label="current-target axes")
         self._left_current_target_axes = None
         self._right_current_target_axes = None
         self._last_left_current_target_display = None
         self._last_right_current_target_display = None
 
         for node in self._arm_frame_nodes.values():
-            try:
-                node.remove()
-            except Exception:
-                pass
+            safe_remove(node, label="arm frame node")
         self._arm_frame_nodes.clear()
 
         if self._ee_frame_node is not None:
-            try:
-                self._ee_frame_node.remove()
-            except Exception:
-                pass
+            safe_remove(self._ee_frame_node, label="end-effector frame node")
             self._ee_frame_node = None
 
         self._initialized = False
@@ -437,12 +428,19 @@ class EndEffectorMarkerManager:
         right_marker = self._right_ee_marker
         left_handler = ros2_interface.left_arm_handler
         right_handler = ros2_interface.right_arm_handler
+        # A disabled arm must not be driven through a stale/hidden marker.
+        left_enabled = self._arm_marker_enabled("left")
+        right_enabled = self._arm_marker_enabled("right")
+        if not left_enabled:
+            self._pending_left_pose = None
+        if not right_enabled:
+            self._pending_right_pose = None
 
         target_pose_updated = self._update_markers_from_target_poses()
         suppress_send = time.time() < getattr(self, "_suppress_marker_send_until", 0.0)
 
         # Process left arm marker
-        if left_marker is not None and left_handler is not None:
+        if left_marker is not None and left_handler is not None and left_enabled:
             self._process_marker_update(
                 "left",
                 left_marker,
@@ -452,7 +450,7 @@ class EndEffectorMarkerManager:
             )
 
         # Process right arm marker
-        if right_marker is not None and right_handler is not None:
+        if right_marker is not None and right_handler is not None and right_enabled:
             self._process_marker_update(
                 "right",
                 right_marker,
@@ -538,6 +536,12 @@ class EndEffectorMarkerManager:
             )
 
             if handler is None:
+                if axes is not None:
+                    axes.visible = False
+                continue
+
+            if not self._arm_marker_enabled(arm):
+                # Disabled arm: no interactive marker, so no target axes either.
                 if axes is not None:
                     axes.visible = False
                 continue
@@ -1449,6 +1453,20 @@ class EndEffectorMarkerManager:
             return False
         return state.head_state == WbcCurrentState.HEAD_TRACKING
     
+    def _arm_marker_enabled(self, arm: str) -> bool:
+        """Whether this arm can be driven by its interactive marker right now.
+
+        In an OCS2 + WBC stack a disabled arm ignores cartesian targets, so its
+        marker must be hidden. Without WBC state (non-WBC stacks, or before the
+        first ``current_state`` message) assume enabled to avoid flicker.
+        """
+        state = getattr(self.ros2_interface, "wbc_state", None)
+        if state is None:
+            return True
+        if arm == "left":
+            return state.left_arm_state == WbcCurrentState.ARM_ENABLED
+        return state.right_arm_state == WbcCurrentState.ARM_ENABLED
+
     def _update_marker_visibility(
         self,
         is_ocs2: bool,
@@ -1457,10 +1475,13 @@ class EndEffectorMarkerManager:
         show_head: Optional[bool] = None,
     ):
         """Update marker visibility based on FSM / WBC tracking state."""
+        left_visible = is_ocs2 and self._arm_marker_enabled("left")
+        right_visible = is_ocs2 and self._arm_marker_enabled("right")
         if self._left_ee_marker is not None:
-            self._left_ee_marker.visible = is_ocs2
+            self._left_ee_marker.visible = left_visible
         if self._right_ee_marker is not None:
-            self._right_ee_marker.visible = is_ocs2
+            self._right_ee_marker.visible = right_visible
+        self._log_arm_marker_visibility(left_visible, right_visible)
         if show_body is None:
             show_body = self._should_show_body_marker()
         if show_head is None:
@@ -1469,6 +1490,21 @@ class EndEffectorMarkerManager:
             self._body_marker.visible = bool(show_body)
         if self._head_marker is not None:
             self._head_marker.visible = bool(show_head)
+
+    def _log_arm_marker_visibility(self, left_visible: bool, right_visible: bool) -> None:
+        """Log arm marker show/hide transitions once (avoids per-tick spam)."""
+        previous = getattr(self, "_last_arm_marker_visible", None)
+        current = (left_visible, right_visible)
+        if previous == current:
+            return
+        self._last_arm_marker_visible = current
+        if previous is not None:
+            logger.info(
+                "End-effector markers: left=%s right=%s (arm %s disabled in WBC state)",
+                "shown" if left_visible else "hidden",
+                "shown" if right_visible else "hidden",
+                "both" if not left_visible and not right_visible else ("left" if not left_visible else "right"),
+            )
     
     def _update_gui_visibility(self, is_ocs2: bool):
         """Update GUI control visibility based on FSM state and publish mode."""

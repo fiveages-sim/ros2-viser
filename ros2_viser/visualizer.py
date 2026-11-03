@@ -16,8 +16,10 @@ from viser.extras import ViserUrdf
 
 from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
 from ros2_robot_interface.utils.discovery import discover_robot_description_topics
+from ros2_robot_interface.utils.rclpy_context import shutdown_rclpy_if_owned
 from ros2_robot_interface.utils.topic_namespace import topic_prefix_from_robot_description
 from .config import ROS2ViserConfig
+from .scene_utils import safe_remove
 from .end_effector_marker import EndEffectorMarkerManager
 from .i18n import get_translator, set_global_language
 from .network_utils import get_local_ip, get_viser_server_port, display_server_info
@@ -27,9 +29,17 @@ logger = logging.getLogger(__name__)
 
 # Dropdown sentinel; display text comes from i18n ("empty_workspace").
 _EMPTY_WORKSPACE_VALUE = ""
+# Rewriting picker options can make the browser echo the first entry back after
+# the load already finished. Ignore a pick equal to that first label for this long;
+# empty picks while a robot is bound are rejected regardless of timing.
+_ROBOT_DROPDOWN_SNAP_GUARD_S = 3.0
 # Visualization-frame sentinel: keep URDF root fixed at the scene origin.
 _VIZ_FRAME_FIXED = "__fixed__"
 _PREFERRED_VIZ_FRAMES = ("world", "map", "odom", "base_footprint", "base_link")
+# How long a robot switch may hold its flag before it is assumed stuck (the
+# worker never started or died): the update loop then clears it so panels and
+# stale-robot cleanup resume.
+_SWITCH_STUCK_AFTER_S = 60.0
 
 
 @dataclass
@@ -50,6 +60,18 @@ class RobotSession:
     mimic_joint_info: dict = field(default_factory=dict)
     joint_name_to_urdf_index: dict[str, int] = field(default_factory=dict)
     visible: bool = True
+    # Whether the last update tick saw joint_states / base TF. Used to log a single
+    # warning when a source disappears (e.g. the simulation stopped) instead of
+    # repeating it every few seconds for the whole outage.
+    joint_state_ok: bool = True
+    base_tf_ok: bool = True
+    # Freshness bookkeeping for pruning robots left over from a previous run.
+    # Wall-clock time, matching ``interface.tf_last_msg_time`` /
+    # ``get_last_joint_state_time()``.
+    created_ts: float = field(default_factory=time.time)
+    last_data_ts: float = 0.0
+    # Hidden because it stopped publishing data (publisher may still exist).
+    stale_hidden: bool = False
 
 
 @dataclass
@@ -76,6 +98,14 @@ class ClientView:
     marker_manager: Optional[EndEffectorMarkerManager] = None
     switching: bool = False
     controls_bound: bool = False
+    # Ignore a browser echo of the picker's first entry until this monotonic time.
+    snap_guard_label: Optional[str] = None
+    snap_guard_until: float = 0.0
+    # When the picker was last written programmatically (for diagnostics).
+    last_dropdown_write_ts: float = 0.0
+    restoring_dropdown: bool = False
+    queued_robot_topic: Optional[str] = None
+    has_queued_robot: bool = False
 
 
 class ROS2ViserVisualizer:
@@ -193,7 +223,10 @@ class ROS2ViserVisualizer:
         self._discovered_viz_frames: list[str] = []
         self._urdf_root_link: Optional[str] = None
         self._robot_base_frame: Optional[viser.FrameHandle] = None
-        self._last_viz_tf_warn_time: float = 0.0
+        # Next time the update loop may check for robots whose publishers vanished.
+        self._next_stale_check: float = 0.0
+        # When the current switch claimed the flag (0.0 = idle).
+        self._switching_since: float = 0.0
         
         # End-effector marker manager
         self._marker_manager: Optional[EndEffectorMarkerManager] = None
@@ -313,14 +346,8 @@ class ROS2ViserVisualizer:
             self._cleanup_control_ui()
             self._bind_session(None)
         with self._scene_lock:
-            try:
-                session.urdf_vis.remove()
-            except Exception as e:
-                logger.debug(f"Error removing session URDF: {e}")
-            try:
-                session.robot_base_frame.remove()
-            except Exception as e:
-                logger.debug(f"Error removing session base frame: {e}")
+            safe_remove(session.urdf_vis, label="session URDF")
+            safe_remove(session.robot_base_frame, label="session base frame")
             self._ensure_scene_environment()
         try:
             if session.interface.is_connected:
@@ -346,14 +373,8 @@ class ROS2ViserVisualizer:
             logger.info("URDF changed for active session, rebuilding visualization...")
             self._cleanup_control_ui()
             with self._scene_lock:
-                try:
-                    session.urdf_vis.remove()
-                except Exception as e:
-                    logger.warning(f"Error removing old URDF visualization: {e}")
-                try:
-                    session.robot_base_frame.remove()
-                except Exception as e:
-                    logger.warning(f"Error removing old robot base frame: {e}")
+                safe_remove(session.urdf_vis, label="old URDF visualization")
+                safe_remove(session.robot_base_frame, label="old robot base frame")
 
             (
                 urdf,
@@ -455,12 +476,80 @@ class ROS2ViserVisualizer:
             return self._default_workspace_label()
         return prefix if prefix.startswith("/") else f"/{prefix}"
 
+    def _topic_prefix_of(self, topic: str) -> str:
+        """Namespace of a robot_description topic ("" for the root workspace)."""
+        try:
+            return topic_prefix_from_robot_description(topic)
+        except ValueError:
+            return ""
+
+    def _robot_picker_topics(self) -> list[str]:
+        """Robot topics offered by both pickers (discovered + cached sessions)."""
+        topics = list(self._discovered_robot_topics)
+        for topic in self._robot_sessions:
+            if topic not in topics:
+                topics.append(topic)
+        if getattr(self.config, "prefer_namespaced_robots", True):
+            namespaced = [t for t in topics if self._topic_prefix_of(t)]
+            if namespaced:
+                # A root-level /robot_description next to namespaced robots is
+                # usually the simulator's default publisher, not the robot being
+                # driven; offering it adds an unrelated robot to the scene.
+                topics = namespaced
+        return topics
+
+    def _prune_root_robot_sessions(self) -> None:
+        """Drop a cached root-workspace robot once namespaced robots are known."""
+        if not getattr(self.config, "prefer_namespaced_robots", True):
+            return
+        if not any(self._topic_prefix_of(t) for t in self._discovered_robot_topics):
+            return
+        removed_any = False
+        for topic in list(self._robot_sessions):
+            if self._topic_prefix_of(topic):
+                continue
+            logger.info(
+                "Removing default-workspace robot %s: namespaced robots are "
+                "published (prefer_namespaced_robots=True)",
+                topic,
+            )
+            self._destroy_session(topic)
+            removed_any = True
+            if topic in self._discovered_robot_topics:
+                self._discovered_robot_topics.remove(topic)
+            if topic == self._selected_robot_topic:
+                self._selected_robot_topic = None
+            for view in list(self._client_views.values()):
+                if view.switching or view.selected_robot_topic != topic:
+                    continue
+                self._cleanup_client_control_ui(view)
+                view.selected_robot_topic = None
+        if removed_any:
+            self._refresh_robot_pickers()
+
     def _robot_dropdown_options(self) -> list[str]:
+        """Labels for the server-level picker; always offers the empty entry."""
         labels = [self._empty_workspace_label()]
-        for topic in self._discovered_robot_topics:
+        for topic in self._robot_picker_topics():
             label = self._namespace_label_for_topic(topic)
             if label not in labels:
                 labels.append(label)
+        return labels
+
+    def _client_robot_dropdown_options(self, view: ClientView) -> list[str]:
+        """Labels for one browser's picker.
+
+        The empty entry is only offered while nothing is bound. Keeping it around
+        after a load means a browser-side echo of ``options[0]`` looks like a
+        deliberate "unload" and tears the freshly loaded robot down again.
+        """
+        labels: list[str] = []
+        for topic in self._robot_picker_topics():
+            label = self._namespace_label_for_topic(topic)
+            if label not in labels:
+                labels.append(label)
+        if not labels or view.selected_robot_topic is None:
+            labels.insert(0, self._empty_workspace_label())
         return labels
 
     def _dropdown_value_for_topic(self, topic: Optional[str]) -> str:
@@ -471,14 +560,17 @@ class ROS2ViserVisualizer:
     def _topic_from_dropdown_value(self, value: str) -> Optional[str]:
         if value == self._empty_workspace_label() or value == _EMPTY_WORKSPACE_VALUE:
             return None
-        for topic in self._discovered_robot_topics:
+        # Cached sessions may outlive graph discovery; mirror the picker options.
+        candidates = self._robot_picker_topics()
+        for topic in candidates:
             if self._namespace_label_for_topic(topic) == value:
                 return topic
         # Back-compat if an old full topic string is still selected.
-        if value in self._discovered_robot_topics:
+        if value in candidates:
             return value
         if value in ("/", self._default_workspace_label()):
-            return "/robot_description"
+            # Only honour the root workspace while it is actually offered.
+            return "/robot_description" if "/robot_description" in candidates else None
         ns = value if value.startswith("/") else f"/{value}"
         return f"{ns}/robot_description"
 
@@ -756,16 +848,28 @@ class ROS2ViserVisualizer:
             frame, root_link, interface=session.interface
         )
         if transform is None:
-            now = time.time()
-            if now - self._last_viz_tf_warn_time > 5.0:
+            if session.base_tf_ok:
+                session.base_tf_ok = False
                 logger.warning(
-                    "No TF %s <- %s for %s; robot root stays at last pose",
+                    "No TF %s <- %s for %s (simulation stopped?); robot root stays "
+                    "at its last pose until TF returns",
                     frame,
                     root_link,
                     session.robot_description_topic,
                 )
-                self._last_viz_tf_warn_time = now
             return
+
+        if not session.base_tf_ok:
+            session.base_tf_ok = True
+            logger.info(
+                "TF %s <- %s is back for %s",
+                frame,
+                root_link,
+                session.robot_description_topic,
+            )
+        session.last_data_ts = time.monotonic()
+        if getattr(session, "stale_hidden", False):
+            self._set_session_stale_hidden(session, False)
 
         t = transform.transform.translation
         r = transform.transform.rotation
@@ -788,6 +892,7 @@ class ROS2ViserVisualizer:
     def _refresh_robot_dropdown(self, *, select_topic: Optional[str] = None) -> None:
         """Refresh discovered robots and update the dropdown options."""
         self._discovered_robot_topics = self._scan_robot_description_topics()
+        self._prune_root_robot_sessions()
         if select_topic is not None:
             self._selected_robot_topic = select_topic
         options = self._robot_dropdown_options()
@@ -807,6 +912,8 @@ class ROS2ViserVisualizer:
             return
         previous = self._selected_robot_topic
         self._refresh_robot_dropdown(select_topic=previous)
+        self._next_stale_check = 0.0
+        self._maybe_prune_stale_sessions()
         self._refresh_viz_frame_dropdown(keep_selection=True)
         logger.info("Robot list refreshed")
 
@@ -819,12 +926,87 @@ class ROS2ViserVisualizer:
         self._request_robot_switch(topic)
 
     def _on_client_robot_dropdown_changed(self, view: ClientView, value: str) -> None:
-        if view.switching or self._switching_robot:
+        if view.restoring_dropdown:
             return
         topic = self._topic_from_dropdown_value(value)
-        if topic == view.selected_robot_topic:
+        if view.switching or self._switching_robot:
+            # Keep the load already in progress. A snap to the empty option
+            # is not a request to unload; another namespace can be queued.
+            if topic is not None:
+                view.queued_robot_topic = topic
+                view.has_queued_robot = True
             return
+        if topic is None and view.controls_bound:
+            # The empty entry is not offered while a robot is bound, so this is a
+            # browser echo (empty string or an options[0] snap), never a user pick.
+            logger.info(
+                "Ignoring empty-workspace picker echo for client %s (keeping %s)",
+                view.client_id,
+                view.selected_robot_topic,
+            )
+            self._restore_client_robot_dropdown(view)
+            return
+        if (
+            view.snap_guard_label is not None
+            and value == view.snap_guard_label
+            and time.monotonic() < view.snap_guard_until
+        ):
+            # Echo of the first option we just wrote; treat it as a no-op.
+            logger.info(
+                "Ignoring picker echo %r for client %s (%.1fs left in guard)",
+                value,
+                view.client_id,
+                view.snap_guard_until - time.monotonic(),
+            )
+            self._restore_client_robot_dropdown(view)
+            return
+        if topic == view.selected_robot_topic and view.controls_bound:
+            return
+        if topic is None:
+            logger.info(
+                "Client %s requested empty workspace (nothing bound before)",
+                view.client_id,
+            )
         self._request_robot_switch(topic, client_view=view)
+
+    def _restore_client_robot_dropdown(self, view: ClientView) -> None:
+        """Put the picker back on the bound robot without treating it as a click."""
+        view.restoring_dropdown = True
+        try:
+            self._set_client_robot_dropdown(view, view.selected_robot_topic)
+        finally:
+            view.restoring_dropdown = False
+
+    def _set_client_robot_dropdown(
+        self, view: ClientView, topic: Optional[str]
+    ) -> None:
+        """Show ``topic`` on this browser's picker without treating it as a click."""
+        dropdown = view.robot_dropdown
+        if dropdown is None:
+            return
+        label = self._dropdown_value_for_topic(topic)
+        options = self._client_robot_dropdown_options(view)
+        if label not in options:
+            options = options + [label]
+        wrote = False
+        try:
+            if list(dropdown.options) != options:
+                dropdown.options = options
+                wrote = True
+        except Exception as e:
+            logger.warning(f"Failed to extend client robot dropdown: {e}")
+            return
+        try:
+            if dropdown.value != label:
+                dropdown.value = label
+                wrote = True
+        except Exception as e:
+            logger.warning(f"Failed to set client robot dropdown: {e}")
+        if wrote and topic:
+            now = time.monotonic()
+            view.last_dropdown_write_ts = now
+            view.snap_guard_label = options[0] if options else None
+            view.snap_guard_until = now + _ROBOT_DROPDOWN_SNAP_GUARD_S
 
     def _request_robot_switch(
         self,
@@ -833,15 +1015,26 @@ class ROS2ViserVisualizer:
         client_view: Optional[ClientView] = None,
     ) -> None:
         """Switch robot on a background thread (connect may take several seconds)."""
-        if self._switching_robot:
-            return
-        if client_view is not None and client_view.switching:
-            return
+        with self._robot_switch_lock:
+            if self._switching_robot:
+                if client_view is not None and robot_description_topic is not None:
+                    client_view.queued_robot_topic = robot_description_topic
+                    client_view.has_queued_robot = True
+                return
+            self._switching_robot = True
+            self._switching_since = time.monotonic()
+            if client_view is not None:
+                client_view.switching = True
+        if client_view is not None:
+            self._set_client_picker_enabled(client_view, False)
+        else:
+            self._set_robot_picker_enabled(False)
         thread = threading.Thread(
             target=self._switch_robot,
             kwargs={
                 "robot_description_topic": robot_description_topic,
                 "client_view": client_view,
+                "switch_claimed": True,
             },
             daemon=True,
             name="ros2-viser-robot-switch",
@@ -1090,16 +1283,8 @@ class ROS2ViserVisualizer:
             time.sleep(0.2)
             return session
         except Exception:
-            if urdf_vis is not None:
-                try:
-                    urdf_vis.remove()
-                except Exception:
-                    pass
-            if robot_base_frame is not None:
-                try:
-                    robot_base_frame.remove()
-                except Exception:
-                    pass
+            safe_remove(urdf_vis, label="partial URDF visualization")
+            safe_remove(robot_base_frame, label="partial robot base frame")
             try:
                 if interface.is_connected:
                     interface.disconnect()
@@ -1225,14 +1410,19 @@ class ROS2ViserVisualizer:
     def _refresh_client_robot_dropdown(self, view: ClientView) -> None:
         if view.robot_dropdown is None:
             return
-        options = self._robot_dropdown_options()
+        options = self._client_robot_dropdown_options(view)
         initial = self._dropdown_value_for_topic(view.selected_robot_topic)
         if initial not in options:
-            initial = self._empty_workspace_label()
-            view.selected_robot_topic = None
+            options = options + [initial]
         try:
-            view.robot_dropdown.options = options
-            view.robot_dropdown.value = initial
+            if list(view.robot_dropdown.options) != options:
+                view.robot_dropdown.options = options
+                now = time.monotonic()
+                view.last_dropdown_write_ts = now
+                view.snap_guard_label = options[0] if options else None
+                view.snap_guard_until = now + _ROBOT_DROPDOWN_SNAP_GUARD_S
+            if view.robot_dropdown.value != initial:
+                view.robot_dropdown.value = initial
         except Exception as e:
             logger.warning(f"Failed to refresh client robot dropdown: {e}")
 
@@ -1241,17 +1431,21 @@ class ROS2ViserVisualizer:
         robot_description_topic: Optional[str],
         *,
         client_view: Optional[ClientView] = None,
+        switch_claimed: bool = False,
     ) -> None:
         """Load/activate a robot session; bind panels for one browser when provided."""
-        with self._robot_switch_lock:
-            if self._switching_robot:
-                return
-            self._switching_robot = True
-        if client_view is not None:
-            client_view.switching = True
-            self._set_client_picker_enabled(client_view, False)
-        else:
-            self._set_robot_picker_enabled(False)
+        if not switch_claimed:
+            with self._robot_switch_lock:
+                if self._switching_robot:
+                    return
+                self._switching_robot = True
+            self._switching_since = time.monotonic()
+            if client_view is not None:
+                client_view.switching = True
+                self._set_client_picker_enabled(client_view, False)
+            else:
+                self._set_robot_picker_enabled(False)
+        bound_topic: Optional[str] = None
         try:
             logger.info(
                 "Switching robot to %s (client=%s)",
@@ -1276,10 +1470,14 @@ class ROS2ViserVisualizer:
                 and client_view.controls_bound
             ):
                 logger.info("Client already controlling %s", robot_description_topic)
+                bound_topic = robot_description_topic
                 return
 
             if robot_description_topic not in self._robot_sessions:
                 self._create_session(robot_description_topic)
+                # A root-workspace robot loaded earlier (simulator default) must
+                # not linger next to the namespaced robot we just added.
+                self._prune_root_robot_sessions()
                 # New robot appears for every browser; refresh their pickers.
                 for other in self._client_views.values():
                     if other is not client_view:
@@ -1288,31 +1486,38 @@ class ROS2ViserVisualizer:
             self._activate_session(robot_description_topic, client_view=client_view)
             # Namespace switch rebuilds meshes off the GUI thread; re-assert lights.
             self._ensure_scene_environment()
+            bound_topic = robot_description_topic
+            if client_view is not None:
+                self._set_client_robot_dropdown(client_view, robot_description_topic)
         except Exception as e:
             logger.error(f"Failed to switch robot: {e}", exc_info=True)
             self._ensure_scene_environment()
-            try:
-                if (
-                    robot_description_topic
-                    and robot_description_topic in self._robot_sessions
-                    and not any(
-                        v.selected_robot_topic == robot_description_topic
-                        for v in self._client_views.values()
-                        if v is not client_view
+            if (
+                client_view is not None
+                and robot_description_topic
+                and robot_description_topic in self._robot_sessions
+            ):
+                # Scene is already up. Bind panels again instead of jumping
+                # the picker back to the empty workspace.
+                try:
+                    self._activate_session(
+                        robot_description_topic, client_view=client_view
                     )
-                ):
-                    # Only destroy if no other client is using it and create failed mid-way.
-                    pass
-            except Exception:
-                pass
-            if client_view is not None:
+                except Exception as retry_error:
+                    logger.error(
+                        "Panel bind failed for %s: %s",
+                        robot_description_topic,
+                        retry_error,
+                        exc_info=True,
+                    )
+                    self._cleanup_client_control_ui(client_view)
+                client_view.selected_robot_topic = robot_description_topic
+                self._set_client_robot_dropdown(client_view, robot_description_topic)
+                bound_topic = robot_description_topic
+            elif client_view is not None:
                 self._cleanup_client_control_ui(client_view)
                 client_view.selected_robot_topic = None
-                if client_view.robot_dropdown is not None:
-                    try:
-                        client_view.robot_dropdown.value = self._empty_workspace_label()
-                    except Exception:
-                        pass
+                self._set_client_robot_dropdown(client_view, None)
             else:
                 self._selected_robot_topic = None
                 if self._robot_dropdown is not None:
@@ -1322,12 +1527,82 @@ class ROS2ViserVisualizer:
                         pass
         finally:
             self._skip_reconnect_detection = True
-            self._switching_robot = False
-            if client_view is not None:
-                client_view.switching = False
-                self._set_client_picker_enabled(client_view, True)
-            else:
-                self._set_robot_picker_enabled(True)
+            queued_topic: Optional[str] = None
+            # Finalize under the switch lock so a picker click arriving now cannot
+            # claim the flag mid-teardown and start a second switch thread.
+            with self._robot_switch_lock:
+                if client_view is not None and client_view.has_queued_robot:
+                    queued_topic = client_view.queued_robot_topic
+                    client_view.has_queued_robot = False
+                    client_view.queued_robot_topic = None
+                if client_view is not None:
+                    client_view.switching = False
+                    self._set_client_picker_enabled(client_view, True)
+                else:
+                    self._set_robot_picker_enabled(True)
+                self._switching_robot = False
+                self._switching_since = 0.0
+            if queued_topic and queued_topic != bound_topic:
+                # Re-acquires the lock; must run outside the block above.
+                self._request_robot_switch(queued_topic, client_view=client_view)
+            elif client_view is not None:
+                if queued_topic and not client_view.controls_bound:
+                    # The queued pick matched what just loaded: bind it rather than
+                    # dropping the request silently.
+                    self._bind_client_view(client_view, queued_topic)
+                else:
+                    # A queued pick that lost to the finished switch: make the
+                    # picker agree with what is actually bound.
+                    self._set_client_robot_dropdown(client_view, bound_topic)
+            if bound_topic:
+                # A browser may have connected while this load was still running; it
+                # would otherwise stay panel-less until the page was refreshed.
+                self._bind_waiting_clients(bound_topic)
+
+    def _bind_client_view(
+        self, view: ClientView, robot_description_topic: str
+    ) -> None:
+        """Attach one browser's panels to an already-loaded session."""
+        if not robot_description_topic:
+            return
+        try:
+            self._activate_session(robot_description_topic, client_view=view)
+        except Exception as e:
+            logger.error(
+                "Panel bind failed for %s (client %s): %s",
+                robot_description_topic,
+                view.client_id,
+                e,
+                exc_info=True,
+            )
+            self._cleanup_client_control_ui(view)
+            view.selected_robot_topic = None
+        self._set_client_robot_dropdown(view, view.selected_robot_topic)
+
+    def _bind_waiting_clients(self, robot_description_topic: str) -> None:
+        """Bind every connected browser that has no panels yet.
+
+        A browser can connect before the auto-detected robot finishes loading; it
+        used to stay panel-less until the page was refreshed.
+        """
+        for view in list(self._client_views.values()):
+            if view.switching or view.controls_bound:
+                continue
+            queued_topic = view.queued_robot_topic if view.has_queued_robot else None
+            view.has_queued_robot = False
+            view.queued_robot_topic = None
+            logger.info(
+                "Binding panels for client %s to %s (connected before load finished)",
+                view.client_id,
+                robot_description_topic,
+            )
+            self._bind_client_view(view, robot_description_topic)
+            if queued_topic and queued_topic != robot_description_topic:
+                logger.info(
+                    "Client %s had queued %s; ask again once panels are up",
+                    view.client_id,
+                    queued_topic,
+                )
 
     def _check_hardware_nodes(self):
         """Check for hardware system nodes and initialize hardware panel if needed.
@@ -1706,14 +1981,8 @@ class ROS2ViserVisualizer:
     def _reload_session_scene(self, session: RobotSession) -> None:
         """Rebuild one session's ViserUrdf (e.g. to load collision meshes on demand)."""
         with self._scene_lock:
-            try:
-                session.urdf_vis.remove()
-            except Exception as e:
-                logger.debug(f"Error removing URDF before reload: {e}")
-            try:
-                session.robot_base_frame.remove()
-            except Exception as e:
-                logger.debug(f"Error removing base frame before reload: {e}")
+            safe_remove(session.urdf_vis, label="URDF before reload")
+            safe_remove(session.robot_base_frame, label="base frame before reload")
         robot_base_frame, urdf_vis, urdf_root_link = self._create_urdf_scene(
             session.urdf, session.root_node_name
         )
@@ -1839,12 +2108,16 @@ class ROS2ViserVisualizer:
         try:
             view.display_folder = client.gui.add_folder(self.translator("display_control"))
             with view.display_folder:
-                options = self._robot_dropdown_options()
+                options = self._client_robot_dropdown_options(view)
                 initial = self._empty_workspace_label()
-                # Prefer already-loaded single robot for new browsers.
+                # Prefer the robot the server already loaded (auto-detect or another
+                # tab), so this browser is bound without a manual pick.
                 # Dropdown options are namespace labels ("默认工作空间" or "/g1d"), not topic paths.
-                if len(self._robot_sessions) == 1:
+                if self._selected_robot_topic:
+                    preload_topic = self._selected_robot_topic
+                elif len(self._robot_sessions) == 1:
                     preload_topic = next(iter(self._robot_sessions.keys()))
+                if preload_topic:
                     initial = self._dropdown_value_for_topic(preload_topic)
                 view.robot_dropdown = client.gui.add_dropdown(
                     self.translator("select_robot"),
@@ -1852,8 +2125,11 @@ class ROS2ViserVisualizer:
                     initial_value=initial if initial in options else self._empty_workspace_label(),
                 )
                 view.robot_dropdown.on_update(
-                    lambda _: self._on_client_robot_dropdown_changed(
-                        view, view.robot_dropdown.value
+                    # Use the event value: a refresh may already have rewritten
+                    # ``.value`` before this callback runs (it is dispatched on a
+                    # thread pool for browser-originated updates).
+                    lambda event: self._on_client_robot_dropdown_changed(
+                        view, event.target.value
                     )
                 )
                 view.refresh_robots_button = client.gui.add_button(
@@ -1930,6 +2206,10 @@ class ROS2ViserVisualizer:
 
     def _on_client_refresh_robots(self, view: ClientView) -> None:
         self._discovered_robot_topics = self._scan_robot_description_topics()
+        self._prune_root_robot_sessions()
+        # Explicit refresh also releases/hides robots whose publisher is gone.
+        self._next_stale_check = 0.0
+        self._maybe_prune_stale_sessions()
         self._refresh_client_robot_dropdown(view)
         for other in self._client_views.values():
             if other is not view:
@@ -2052,10 +2332,7 @@ class ROS2ViserVisualizer:
                 self._urdf_root_link = self._resolve_urdf_root_link()
                 # Parent frame owns the whole robot pose in the selected viz TF frame.
                 if self._robot_base_frame is not None:
-                    try:
-                        self._robot_base_frame.remove()
-                    except Exception:
-                        pass
+                    safe_remove(self._robot_base_frame, label="robot base frame")
                     self._robot_base_frame = None
                 self._robot_base_frame = self.server.scene.add_frame(
                     self._active_root_node_name,
@@ -2146,6 +2423,49 @@ class ROS2ViserVisualizer:
                 session._last_joint_map_warn_time = now  # type: ignore[attr-defined]
         return cfg
 
+    def _update_session_joint_state(self, session: RobotSession) -> bool:
+        """Push one session's joint_states into its URDF.
+
+        Outages (e.g. the simulation was stopped) are logged once on the
+        transition and once when data returns, instead of every few seconds.
+        """
+        joint_state = session.interface.get_joint_state()
+        if joint_state is None:
+            if session.joint_state_ok:
+                session.joint_state_ok = False
+                config = session.interface.config
+                topic = getattr(config, "joint_states_topic", "?")
+                ns = (getattr(config, "namespace", "") or "").strip("/")
+                effective = (
+                    f"/{ns}/{str(topic).lstrip('/')}"
+                    if ns and isinstance(topic, str) and not topic.startswith("/")
+                    else topic
+                )
+                logger.warning(
+                    "No joint_states for %s (subscribed to %s → %s); robot pose "
+                    "stays frozen until they return",
+                    session.robot_description_topic,
+                    topic,
+                    effective,
+                )
+            return False
+        if not session.joint_state_ok:
+            session.joint_state_ok = True
+            logger.info(
+                "joint_states is back for %s", session.robot_description_topic
+            )
+        session.last_data_ts = time.monotonic()
+        if getattr(session, "stale_hidden", False):
+            self._set_session_stale_hidden(session, False)
+        joint_cfg = self._map_joint_states_for_session(
+            session,
+            joint_state["names"],
+            joint_state["positions"],
+        )
+        if joint_cfg:
+            session.urdf_vis.update_cfg(joint_cfg)
+        return True
+
     def _update_loop(self):
         """Update all shared robot scenes and each browser's control panels."""
         update_period = 1.0 / self.config.update_rate
@@ -2154,75 +2474,205 @@ class ROS2ViserVisualizer:
         while self._running:
             # Keep driving shared robot meshes even while a client is switching
             # panels; only panel rebind needs to wait on _switching_robot.
-            for session in list(self._robot_sessions.values()):
-                try:
-                    # Still apply TF even if joint_states briefly time out.
-                    if session.interface.robot_node is not None:
-                        self._apply_session_base_from_tf(session)
-                    joint_state = session.interface.get_joint_state()
-                    if joint_state is None:
+            try:
+                self._recover_stuck_switch()
+                for session in list(self._robot_sessions.values()):
+                    try:
+                        # Still apply TF even if joint_states briefly time out.
+                        if session.interface.robot_node is not None:
+                            self._apply_session_base_from_tf(session)
+                        self._update_session_joint_state(session)
+                    except Exception as e:
                         key = session.robot_description_topic
                         now = time.time()
-                        if now - last_joint_warn.get(key, 0.0) > 5.0:
-                            topic = getattr(
-                                session.interface.config, "joint_states_topic", "?"
-                            )
-                            ns = (
-                                getattr(session.interface.config, "namespace", "") or ""
-                            ).strip("/")
-                            effective = (
-                                f"/{ns}/{str(topic).lstrip('/')}"
-                                if ns and isinstance(topic, str) and not topic.startswith("/")
-                                else topic
-                            )
+                        if now - last_joint_warn.get(key + ":err", 0.0) > 5.0:
                             logger.warning(
-                                "No joint_states yet for %s (subscribed to %s → %s)",
+                                "Session update failed for %s: %s",
                                 key,
-                                topic,
-                                effective,
+                                e,
                             )
-                            last_joint_warn[key] = now
-                        continue
-                    joint_cfg = self._map_joint_states_for_session(
-                        session,
-                        joint_state["names"],
-                        joint_state["positions"],
-                    )
-                    if joint_cfg:
-                        session.urdf_vis.update_cfg(joint_cfg)
-                except Exception as e:
-                    key = session.robot_description_topic
-                    now = time.time()
-                    if now - last_joint_warn.get(key + ":err", 0.0) > 5.0:
-                        logger.warning(
-                            "Session update failed for %s: %s",
-                            key,
-                            e,
-                        )
-                        last_joint_warn[key + ":err"] = now
+                            last_joint_warn[key + ":err"] = now
 
-            if self._switching_robot:
-                time.sleep(update_period)
-                continue
+                if not self._switching_robot:
+                    # Per-client panels / markers (each browser picks its own robot).
+                    for view in list(self._client_views.values()):
+                        if view.switching:
+                            continue
+                        try:
+                            if view.fsm_panel is not None:
+                                view.fsm_panel.update()
+                            if view.gripper_panel is not None:
+                                view.gripper_panel.update()
+                            if view.joint_panel is not None:
+                                view.joint_panel.update()
+                            if view.marker_manager is not None:
+                                view.marker_manager.update()
+                        except Exception as e:
+                            logger.debug(
+                                f"Client {view.client_id} panel update failed: {e}"
+                            )
 
-            # Per-client panels / markers (each browser controls its selected robot).
-            for view in list(self._client_views.values()):
-                if view.switching:
-                    continue
-                try:
-                    if view.fsm_panel is not None:
-                        view.fsm_panel.update()
-                    if view.gripper_panel is not None:
-                        view.gripper_panel.update()
-                    if view.joint_panel is not None:
-                        view.joint_panel.update()
-                    if view.marker_manager is not None:
-                        view.marker_manager.update()
-                except Exception as e:
-                    logger.debug(f"Client {view.client_id} panel update failed: {e}")
+                    self._maybe_prune_stale_sessions()
+            except Exception as e:
+                # Never let one bad iteration kill the loop: robots would freeze
+                # and stale sessions would never be released.
+                logger.error("Update loop iteration failed: %s", e, exc_info=True)
 
             time.sleep(update_period)
-    
+
+    def _recover_stuck_switch(self) -> None:
+        """Clear a switch flag left set by a worker thread that never ran.
+
+        ``_request_robot_switch`` claims ``_switching_robot`` before starting the
+        worker. If the thread cannot be started (or dies unexpectedly) the flag
+        would stay set forever, freezing panel updates and stale-robot cleanup.
+        """
+        if not self._switching_robot or not self._switching_since:
+            return
+        elapsed = time.monotonic() - self._switching_since
+        if elapsed < _SWITCH_STUCK_AFTER_S:
+            return
+        logger.error(
+            "Robot switch stuck for %.0fs; clearing the flag (panels and stale "
+            "cleanup resume)",
+            elapsed,
+        )
+        self._switching_robot = False
+        self._switching_since = 0.0
+        for view in list(self._client_views.values()):
+            view.switching = False
+
+    def _session_has_publisher(self, session: RobotSession) -> bool:
+        """Whether the robot_description topic still has a publisher.
+
+        Conservative on failure: a query error keeps the session instead of
+        deleting a robot that may still be alive.
+        """
+        try:
+            node = session.interface.robot_node
+            if node is None:
+                return False
+            return int(node.count_publishers(session.robot_description_topic)) > 0
+        except Exception as e:
+            logger.debug(f"Publisher check failed for {session.robot_description_topic}: {e}")
+            return True
+
+    def _set_session_stale_hidden(self, session: RobotSession, hidden: bool) -> None:
+        """Hide/show one robot in the scene without dropping its session."""
+        if getattr(session, "stale_hidden", False) == hidden:
+            return
+        session.stale_hidden = hidden
+        try:
+            session.robot_base_frame.visible = not hidden
+        except Exception as e:
+            logger.debug(f"Failed to toggle visibility for {session.robot_description_topic}: {e}")
+            return
+        if hidden:
+            logger.info(
+                "Hiding %s: no joint_states/TF for a while (publisher alive but "
+                "silent — leftover simulation?)",
+                session.robot_description_topic,
+            )
+        else:
+            logger.info(
+                "Showing %s again: data is flowing", session.robot_description_topic
+            )
+
+    def _session_last_msg_time(self, session: RobotSession) -> float:
+        """Wall-clock time of the last joint_states/TF message for this session.
+
+        A successful TF *lookup* is not a liveness signal: tf2 answers from its
+        cache long after the simulator stopped, which kept stale sessions looking
+        fresh forever. Only real message arrivals count.
+        """
+        latest = 0.0
+        try:
+            joint_ts = session.interface.get_last_joint_state_time()
+            if joint_ts:
+                latest = max(latest, float(joint_ts))
+        except Exception as e:
+            logger.debug(f"joint-state liveness query failed: {e}")
+        try:
+            tf_ts = float(getattr(session.interface, "tf_last_msg_time", 0.0) or 0.0)
+            latest = max(latest, tf_ts)
+        except Exception as e:
+            logger.debug(f"TF liveness query failed: {e}")
+        return latest
+
+    def _maybe_prune_stale_sessions(self) -> None:
+        """Drop or hide robots left over from a previous simulation run.
+
+        Sessions stay cached so switching back is instant, but when a simulator
+        stops the robot would stay in the scene forever — the next run then shows
+        an extra robot. After a grace period without data:
+
+        * no publisher on the topic → the robot is gone, destroy the session;
+        * publisher still there but silent (leftover nodes) → keep the session but
+          hide the robot until data flows again.
+        """
+        grace = float(getattr(self.config, "prune_stale_robots_after", 5.0) or 0.0)
+        if grace <= 0.0 or not self._robot_sessions:
+            return
+        now = time.time()
+        if now < self._next_stale_check:
+            return
+        self._next_stale_check = now + grace
+        removed_any = False
+        for topic, session in list(self._robot_sessions.items()):
+            try:
+                last_seen = self._session_last_msg_time(session) or session.created_ts
+                if last_seen and now - last_seen < grace:
+                    continue
+                if self._session_has_publisher(session):
+                    self._set_session_stale_hidden(session, True)
+                    continue
+                logger.warning(
+                    "Removing robot %s: no publisher on %s (simulation stopped?)",
+                    topic,
+                    topic,
+                )
+                self._destroy_session(topic)
+                removed_any = True
+                if topic in self._discovered_robot_topics:
+                    self._discovered_robot_topics.remove(topic)
+                if topic == self._selected_robot_topic:
+                    self._selected_robot_topic = None
+                for view in list(self._client_views.values()):
+                    if view.switching or view.selected_robot_topic != topic:
+                        continue
+                    self._cleanup_client_control_ui(view)
+                    view.selected_robot_topic = None
+            except Exception as e:
+                # Keep checking the remaining sessions.
+                logger.error(
+                    "Stale-robot cleanup failed for %s: %s", topic, e, exc_info=True
+                )
+        if removed_any:
+            # Drop the removed namespaces from every picker too, otherwise the
+            # labels stay listed until the next graph scan.
+            self._refresh_robot_pickers()
+
+    def _refresh_robot_pickers(self) -> None:
+        """Rewrite picker options/values without re-scanning the graph."""
+        for view in list(self._client_views.values()):
+            if view.switching:
+                continue
+            try:
+                self._refresh_client_robot_dropdown(view)
+            except Exception as e:
+                logger.debug(f"Failed to refresh picker for client {view.client_id}: {e}")
+        dropdown = getattr(self, "_robot_dropdown", None)
+        if dropdown is not None:
+            try:
+                options = self._robot_dropdown_options()
+                initial = self._dropdown_value_for_topic(self._selected_robot_topic)
+                if initial not in options:
+                    initial = self._empty_workspace_label()
+                    self._selected_robot_topic = None
+                dropdown.options = options
+                dropdown.value = initial
+            except Exception as e:
+                logger.debug(f"Failed to refresh server robot picker: {e}")
     def _map_joint_states(self, joint_names: list[str], positions: list[float]) -> dict[str, float]:
         """Map joint states from ROS2 topic to URDF actuated name→position dict."""
         if len(self.urdf_actuated_joint_names) == 0:
@@ -2243,19 +2693,27 @@ class ROS2ViserVisualizer:
         
         self._running = True
 
+        logger.info(
+            "Stale-robot policy: %.1fs without joint_states/TF → hide (publisher "
+            "alive) or release (publisher gone)",
+            float(getattr(self.config, "prune_stale_robots_after", 5.0) or 0.0),
+        )
+
         # Discover robots before browsers connect so pickers are populated.
         self._discovered_robot_topics = self._scan_robot_description_topics()
+        self._prune_root_robot_sessions()
 
         # Non-default robot_description_topic from caller pre-selects that topic.
         configured = self.config.robot_description_topic
+        candidates = self._robot_picker_topics()
         if (
             configured
             and configured != "/robot_description"
-            and configured in self._discovered_robot_topics
+            and configured in candidates
         ):
             self._selected_robot_topic = configured
-        elif len(self._discovered_robot_topics) == 1:
-            self._selected_robot_topic = self._discovered_robot_topics[0]
+        elif len(candidates) == 1:
+            self._selected_robot_topic = candidates[0]
         else:
             self._selected_robot_topic = None
 
@@ -2279,34 +2737,51 @@ class ROS2ViserVisualizer:
         logger.info("✅ Visualizer started successfully")
     
     def stop(self):
-        """Stop the visualizer and cleanup resources."""
+        """Stop the visualizer and release every resource it created."""
+        if not self._running and not self._robot_sessions and not self._client_views:
+            logger.debug("Visualizer already stopped")
+            return
+
         self._running = False
-        
-        # Tear down every browser's panels/markers first.
+
+        # Stop the update loop first: it drives the panels we are about to remove.
+        if self._update_thread is not None:
+            self._update_thread.join(timeout=2.0)
+            if self._update_thread.is_alive():
+                logger.warning("Update loop did not stop within 2s; continuing teardown")
+            self._update_thread = None
+
+        # Tear down every browser's panels/markers.
         for client_id in list(self._client_views.keys()):
             view = self._client_views.pop(client_id, None)
             if view is not None:
                 self._cleanup_client_control_ui(view)
         self._cleanup_control_ui()
-        
-        # Wait for update thread first (it uses ros2_interface)
-        if self._update_thread is not None:
-            self._update_thread.join(timeout=2.0)
-        
-        # Wait a bit to let any in-flight ROS2 callbacks complete
-        time.sleep(0.2)
-        
-        # Disconnect and remove every cached robot session
+
+        # Let any in-flight ROS2 callback finish before destroying interfaces.
+        time.sleep(0.1)
+
+        # Disconnect and remove every cached robot session.
         self._destroy_all_sessions()
         self._selected_robot_topic = None
-        
+
         if self._display_folder_handle is not None:
-            try:
-                self._display_folder_handle.remove()
-            except Exception as e:
-                logger.warning(f"Error removing display control panel: {e}")
+            safe_remove(self._display_folder_handle, label="display control panel")
             self._display_folder_handle = None
-        
+
+        # Release the rclpy context we created; no-op when the caller owns one.
+        try:
+            shutdown_rclpy_if_owned()
+        except Exception as e:
+            logger.debug(f"Failed to shut down rclpy context: {e}")
+
+        # Close the websocket server / share tunnel so the process can exit.
+        if self.server is not None:
+            try:
+                self.server.stop()
+            except Exception as e:
+                logger.debug(f"Error stopping viser server: {e}")
+            self.server = None
         logger.info("Visualizer stopped")
     
     def __enter__(self):

@@ -46,3 +46,7 @@ include = ["ros2_viser*"]
 
 [tool.setuptools.package-data]
 ros2_viser = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

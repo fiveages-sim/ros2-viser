@@ -9,6 +9,7 @@ import viser
 from ros2_robot_interface import ROS2RobotInterface
 
 from ..i18n import get_translator
+from ..scene_utils import safe_remove
 
 logger = logging.getLogger(__name__)
 
@@ -390,10 +391,7 @@ class GripperPanel:
                         self._create_gripper_buttons(GripperType.RIGHT, self._right_display_name)
                 
                 # Remove old folder
-                try:
-                    old_folder.remove()
-                except Exception as e:
-                    logger.debug(f"Could not remove old folder: {e}")
+                safe_remove(old_folder, label="old gripper folder")
                 
                 self._prev_left_gripper_open = None
                 self._prev_right_gripper_open = None
@@ -422,8 +420,8 @@ class GripperPanel:
                 try:
                     if hasattr(self._folder_handle, 'visible'):
                         self._folder_handle.visible = False
-                    elif hasattr(self._folder_handle, 'remove'):
-                        self._folder_handle.remove()
+                    else:
+                        safe_remove(self._folder_handle, label="gripper folder")
                 except Exception as e:
                     logger.debug(f"Could not hide/remove folder: {e}")
         except Exception as e:
