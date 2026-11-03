@@ -9,6 +9,7 @@ from ros2_robot_interface import ROS2RobotInterface
 
 from ..i18n import get_text_in_language, get_translator
 from ..modal_dialog import M6CCSConfigDialog
+from ..scene_utils import safe_remove
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +259,7 @@ class HardwarePanel:
             
             # Remove old folder
             if old_folder is not None:
-                old_folder.remove()
+                safe_remove(old_folder, label="old hardware folder")
             
             logger.debug("Hardware panel GUI labels updated")
             
@@ -279,7 +280,7 @@ class HardwarePanel:
             self._m6_ccs_dialog = None
             
             if self._folder_handle is not None:
-                self._folder_handle.remove()
+                safe_remove(self._folder_handle, label="hardware folder")
                 self._folder_handle = None
             
             self._status_text = None
